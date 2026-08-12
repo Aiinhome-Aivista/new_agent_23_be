@@ -156,6 +156,15 @@ async def generate_tests(session_id: str, background_tasks: BackgroundTasks, db:
     background_tasks.add_task(run_agent_workflow, session_id)
     return {"message": "Test generation triggered. Connect to SSE stream for updates."}
 
+@router.get("/sessions/{session_id}/tests")
+async def get_tests(session_id: str, db: AsyncSession = Depends(get_db)):
+    res = await db.execute(select(UnitTest).join(ServiceContract).where(ServiceContract.session_id == session_id))
+    tests = res.scalars().all()
+    return {"tests": [
+        {"test_id": t.test_id, "test_name": t.test_name, "code_content": t.code_content, "framework": t.framework}
+        for t in tests
+    ]}
+
 @router.get("/sessions/{session_id}/stream")
 async def stream_agent_execution(session_id: str):
     return StreamingResponse(subscribe_logs(session_id), media_type="text/event-stream")
@@ -216,16 +225,32 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
         if tests:
             for t in tests:
                 zip_file.writestr(t.test_name, t.code_content)
-                test_list.append({"service": t.test_name.replace("Test.java", ""), "code": t.code_content})
+                test_list.append({"service": t.test_name.split("Test")[0], "code": t.code_content})
         else:
-            # Fallback
-            from agent.nodes import SAMPLE_USER_SERVICE_TEST, SAMPLE_AUTH_SERVICE_TEST
-            zip_file.writestr("UserServiceTest.java", SAMPLE_USER_SERVICE_TEST)
-            zip_file.writestr("AuthServiceTest.java", SAMPLE_AUTH_SERVICE_TEST)
-            test_list = [
-                {"service": "UserService", "code": SAMPLE_USER_SERVICE_TEST},
-                {"service": "AuthService", "code": SAMPLE_AUTH_SERVICE_TEST}
-            ]
+            # Dynamic Fallback: fetch proposed services
+            from sqlalchemy import select
+            from models import ServiceContract
+            serv_res = await db.execute(select(ServiceContract).where(ServiceContract.session_id == session_id))
+            services = serv_res.scalars().all()
+            
+            lang_lower = tech_profile.get("language", "Java").lower()
+            ext = ".java" if "java" in lang_lower else ".py" if "python" in lang_lower else ".ts" if "typescript" in lang_lower else ".js"
+            
+            if services:
+                for s in services:
+                    filename = f"{s.name}Test{ext}"
+                    if "java" in lang_lower:
+                        fallback_code = f"// Fallback test suite for {s.name}\npublic class {s.name}Test {{\n}}"
+                    else:
+                        fallback_code = f"# Fallback test suite for {s.name}\n"
+                        
+                    zip_file.writestr(filename, fallback_code)
+                    test_list.append({"service": s.name, "code": fallback_code})
+            else:
+                filename = f"GeneratedTest{ext}"
+                fallback_code = f"// Generated Unit Test Suite\n"
+                zip_file.writestr(filename, fallback_code)
+                test_list.append({"service": "Generated", "code": fallback_code})
 
         # Generate Word report and include it inside the ZIP package
         docx_bytes = generate_word_report_docx(session_id, tech_profile, matrix_list, test_list)

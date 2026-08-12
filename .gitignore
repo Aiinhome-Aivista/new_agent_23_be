@@ -15,3 +15,5 @@ __pycache__/
 
 utgc_agent.db
 *.db
+utgc_agent.db-shm
+utgc_agent.db-wal

@@ -1,7 +1,8 @@
 import os
 import asyncio
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, event
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import NullPool
 from config import settings
 
 # Built-in SQLite engine (Zero external dependencies, instant 0ms local connection, 100% offline & crash-proof)
@@ -10,9 +11,25 @@ SQLITE_URL = f"sqlite:///{DB_FILE}"
 
 engine = create_engine(
     SQLITE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30  # Wait up to 30s for lock release
+    },
+    poolclass=NullPool,  # Disable connection pooling to close handles immediately
     echo=False
 )
+
+# Enable WAL (Write-Ahead Logging) and Normal sync for maximum SQLite concurrency and reliability
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    finally:
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

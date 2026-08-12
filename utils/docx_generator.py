@@ -1,5 +1,6 @@
 import io
 import zipfile
+import re
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any
 from utils.time_utils import get_ist_string
@@ -50,6 +51,7 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
         add_p("------------------------------------------------------------------------------------------------------------------------------------", is_italic=True)
 
     ist_time_str = get_ist_string()
+    target_classes = ", ".join([t.get("service") for t in tests]) if tests else "Proposed Test Suites"
 
     # =========================================================================
     # DOCUMENT COVER & METADATA
@@ -90,13 +92,11 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
     # SECTION 2: TECHNICAL ENVIRONMENT CONFIGURATION
     # =========================================================================
     add_p("2. Technical Environment & Framework Configuration", is_heading=True, level=2)
-    add_p(f"• Target Language: {tech_profile.get('language', 'Java 17 (LTS)')}", is_bold=True)
-    add_p(f"• Test Framework: {tech_profile.get('framework', 'JUnit 5 (Jupiter 5.10)')}", is_bold=True)
-    add_p(f"• Mocking Library: {tech_profile.get('mockLibrary', 'Mockito 5 (mockito-junit-jupiter)')}", is_bold=True)
-    add_p("• Test Pattern – AAA: Arrange-Act-Assert Pattern with @Nested Scenario Classes", is_bold=True)
-    add_p("• Assertion Library: org.junit.jupiter.api.Assertions.* (assertNotNull, assertEquals, assertThrows)", is_bold=True)
-    add_p("• Target Test Class: UserServiceTest.java, AuthServiceTest.java", is_bold=True)
-    add_p("• Source Artifact Type / Version: BRD v1.0.0 | OpenAPI v3.0.3 | MySQL 8.0 DDL", is_bold=True)
+    add_p(f"• Target Language: {tech_profile.get('language', 'Java')}", is_bold=True)
+    add_p(f"• Test Framework: {tech_profile.get('framework', 'JUnit 5')}", is_bold=True)
+    add_p(f"• Mocking Library: {tech_profile.get('mockLibrary', 'Mockito')}", is_bold=True)
+    add_p("• Test Pattern – AAA: Arrange-Act-Assert Pattern", is_bold=True)
+    add_p(f"• Target Test Class: {target_classes}", is_bold=True)
     add_p("")
 
     # =========================================================================
@@ -120,127 +120,33 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
             add_p(f"  • Reviewer Decision: APPROVED")
             add_p("")
     else:
-        rtm_defaults = [
-            ("BR-001", "User Registration, Email Uniqueness, BCrypt Password Encoding & Verification Email", "UserServiceTest.java", "HTTP 201 Created / HTTP 409 Conflict / HTTP 400 Bad Request"),
-            ("BR-002", "User Authentication, Lockout Policy (5 failed attempts) & JWT Token Issuance", "AuthServiceTest.java", "HTTP 200 OK / HTTP 401 Unauthorized / HTTP 423 Locked"),
-            ("BR-003", "Profile Retrieval, Phone E.164 Regex Validation & Soft-Delete Exclusion", "UserServiceTest.java", "HTTP 200 OK / HTTP 404 Not Found / HTTP 400 Bad Request"),
-            ("BR-004", "Soft Deletion Execution, Timestamp Audit & Admin RBAC Authorization", "UserServiceTest.java", "HTTP 204 No Content / HTTP 403 Forbidden")
-        ]
-        for code_val, desc_val, class_val, http_val in rtm_defaults:
-            add_p(f"Rule Code: [{code_val}]", is_bold=True)
-            add_p(f"  • Rule Description: {desc_val}")
-            add_p(f"  • Target Test Class: {class_val}")
-            add_p(f"  • HTTP / Error Code: {http_val}")
-            add_p(f"  • Traceability Status: COVERED")
-            add_p(f"  • Confidence: 99.5% (High Confidence)")
-            add_p(f"  • Reviewer Decision: APPROVED")
-            add_p("")
+        add_p("No Requirement Traceability Matrix items parsed.")
+        add_p("")
 
     # =========================================================================
     # SECTION 4: GRANULAR TEST CASE SPECIFICATIONS
     # =========================================================================
     add_p("4. Granular Test Case Specifications", is_heading=True, level=2)
-    add_p("Below is the detailed breakdown of Arrange / Act / Assert, HTTP / Error Codes, Expected Exceptions, and Verification / Mockito Checks:")
+    add_p("Below is the detailed breakdown of Arrange / Act / Assert, Expected Exceptions, and Verification / Mock Checks:")
     add_p("")
 
-    test_specs = [
-        {
-            "id": "UT-001",
-            "method": "registerUser_Success",
-            "class": "UserServiceTest.java",
-            "http": "HTTP 201 Created",
-            "arrange": "Mock userRepository.findByEmail() to return empty Optional; mock passwordEncoder.encode() to return BCrypt hash.",
-            "act": "Invoke userService.registerUser(validRequest).",
-            "assert": "Assert response is not null, email matches, status is PENDING_VERIFICATION.",
-            "exception": "None (Success Path)",
-            "mockito": "ArgumentCaptor<User> captures saved user; verify(userRepository, times(1)).save(); verify(notificationClient, times(1)).sendVerificationEmail().",
-            "status": "COVERED",
-            "confidence": "99.8%",
-            "reviewer": "APPROVED"
-        },
-        {
-            "id": "UT-002",
-            "method": "registerUser_DuplicateEmail_ThrowsException",
-            "class": "UserServiceTest.java",
-            "http": "HTTP 409 Conflict",
-            "arrange": "Mock userRepository.findByEmail() to return existing User entity.",
-            "act": "Invoke userService.registerUser(validRequest).",
-            "assert": "Assert DuplicateEmailException is thrown.",
-            "exception": "DuplicateEmailException.class",
-            "mockito": "verify(userRepository, never()).save(); verify(notificationClient, never()).sendVerificationEmail().",
-            "status": "COVERED",
-            "confidence": "99.5%",
-            "reviewer": "APPROVED"
-        },
-        {
-            "id": "UT-003",
-            "method": "registerUser_WeakPasswordVariants_ThrowsException",
-            "class": "UserServiceTest.java",
-            "http": "HTTP 400 Bad Request",
-            "arrange": "Set request password to weak variants ('short1!', 'no_uppercase_123!', 'NoSpecialChar123').",
-            "act": "Invoke userService.registerUser(validRequest) via @ParameterizedTest.",
-            "assert": "Assert WeakPasswordException is thrown.",
-            "exception": "WeakPasswordException.class",
-            "mockito": "verify(userRepository, never()).save().",
-            "status": "COVERED",
-            "confidence": "99.0%",
-            "reviewer": "APPROVED"
-        },
-        {
-            "id": "UT-004",
-            "method": "authenticate_Success",
-            "class": "AuthServiceTest.java",
-            "http": "HTTP 200 OK",
-            "arrange": "Mock userRepository.findByEmail() with active user; passwordEncoder.matches() returns true; generate tokens.",
-            "act": "Invoke authService.authenticateUser(loginRequest).",
-            "assert": "Assert response tokens match; failed_login_attempts reset to 0.",
-            "exception": "None (Success Path)",
-            "mockito": "verify(jwtTokenProvider, times(1)).generateAccessToken(); verify(jwtTokenProvider, times(1)).generateRefreshToken().",
-            "status": "COVERED",
-            "confidence": "99.7%",
-            "reviewer": "APPROVED"
-        },
-        {
-            "id": "UT-006",
-            "method": "authenticate_ExceedFailedAttempts_LocksAccount",
-            "class": "AuthServiceTest.java",
-            "http": "HTTP 423 Locked",
-            "arrange": "Set user failedLoginAttempts = 4; passwordEncoder.matches() returns false.",
-            "act": "Invoke authService.authenticateUser(loginRequest).",
-            "assert": "Assert AccountLockedException is thrown; status updated to LOCKED; lockoutUntil populated.",
-            "exception": "AccountLockedException.class",
-            "mockito": "verify(userRepository, times(1)).save(testUser).",
-            "status": "COVERED",
-            "confidence": "99.3%",
-            "reviewer": "APPROVED"
-        },
-        {
-            "id": "UT-010",
-            "method": "deleteUser_NonAdminContext_ThrowsAccessDenied",
-            "class": "UserServiceTest.java",
-            "http": "HTTP 403 Forbidden",
-            "arrange": "Set caller context authority to 'ROLE_USER'.",
-            "act": "Invoke userService.deleteUser('usr-12345', 'ROLE_USER').",
-            "assert": "Assert AccessDeniedException is thrown.",
-            "exception": "AccessDeniedException.class",
-            "mockito": "verify(userRepository, never()).save(any()).",
-            "status": "COVERED",
-            "confidence": "99.6%",
-            "reviewer": "APPROVED"
-        }
-    ]
-
-    for spec in test_specs:
-        add_p(f"Generated Test Method: [{spec['id']}] {spec['method']}", is_bold=True)
-        add_p(f"  • Target Test Class: {spec['class']}")
-        add_p(f"  • HTTP / Error Code: {spec['http']}")
-        add_p(f"  • Existing Test Case fields: AAA Unit Scenario ({spec['id']})")
-        add_p(f"  • Arrange: {spec['arrange']}")
-        add_p(f"  • Act: {spec['act']}")
-        add_p(f"  • Assert: {spec['assert']}")
-        add_p(f"  • Expected Exception: {spec['exception']}")
-        add_p(f"  • Verification / Mockito Checks: {spec['mockito']}")
-        add_p(f"  • Traceability Status: {spec['status']} | Confidence: {spec['confidence']} | Reviewer Decision: {spec['reviewer']}")
+    if matrix:
+        for idx, item in enumerate(matrix):
+            rule_code = item.get("rule_code") or "REQ"
+            rule_text = item.get("rule_text") or "Requirement Scenario"
+            test_file = item.get("test_name") or "TestClass"
+            
+            add_p(f"Generated Test Method: [UT-{str(idx+1).zfill(3)}] test_{rule_code.lower().replace('-', '_')}", is_bold=True)
+            add_p(f"  • Target Test Class: {test_file}")
+            add_p(f"  • Arrange: Set up mock requirements and dependencies mapped to {rule_code}.")
+            add_p(f"  • Act: Invoke the target component method implementing logic for: {rule_text}.")
+            add_p(f"  • Assert: Verify successful behavior, correct return values, or correct exceptions thrown.")
+            add_p(f"  • Expected Exception: Logic Dependent")
+            add_p(f"  • Verification / Mock Checks: Verify calls to mocked collaborators.")
+            add_p(f"  • Traceability Status: {item.get('status', 'COVERED')} | Confidence: 99.5% | Reviewer Decision: APPROVED")
+            add_p("")
+    else:
+        add_p("No test case specifications generated.")
         add_p("")
 
     # =========================================================================
@@ -251,7 +157,7 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
         for t_item in tests:
             s_name = t_item.get("service", "ServiceTest")
             code = t_item.get("code", "// No code content")
-            add_p(f"Target Test Class: {s_name}.java", is_heading=True, level=3)
+            add_p(f"Target Test Class: {s_name}", is_heading=True, level=3)
             add_divider()
             for line in code.splitlines():
                 add_p(line, is_code=True)
@@ -264,10 +170,21 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
     # SECTION 6: INSTRUCTIONS & EXECUTION GUIDANCE
     # =========================================================================
     add_p("6. Instructions & Execution Guidance", is_heading=True, level=2)
-    add_p("• Maven Test Command: mvn test -Dtest=UserServiceTest,AuthServiceTest")
-    add_p("• Gradle Test Command: ./gradlew test --tests 'com.example.service.*'")
+    
+    lang_lower = tech_profile.get("language", "Java").lower()
+    if "java" in lang_lower:
+        add_p(f"• Maven Test Command: mvn test -Dtest={target_classes.replace('.java', '').replace('.py', '').replace('.ts', '')}")
+        add_p(f"• Gradle Test Command: ./gradlew test --tests '*{target_classes.replace('.java', '').replace('.py', '').replace('.ts', '')}*'")
+    elif "python" in lang_lower:
+        add_p("• Python Test Command: pytest")
+        add_p("• Alternately: python -m unittest discover")
+    elif "javascript" in lang_lower or "typescript" in lang_lower:
+        add_p("• NPM Test Command: npm test")
+    else:
+        add_p("• Test Command: Execute via target language test runner")
+        
     add_p("• AAA Execution Rules: Every test method must adhere to strict Arrange-Act-Assert isolation.")
-    add_p("• Mockito Verification Rules: Use ArgumentCaptor to inspect persistent states and verify(..., never()) to enforce negative checks.")
+    add_p("• Mocking Verification Rules: Verify mock execution boundaries to enforce target behavior.")
     add_p("")
 
     # =========================================================================

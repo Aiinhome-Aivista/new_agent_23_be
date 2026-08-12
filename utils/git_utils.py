@@ -35,7 +35,7 @@ def clone_repo(git_url: str, branch: Optional[str] = None) -> str:
         raise Exception(f"Failed to clone repository: {result.stderr or result.stdout}")
     return temp_dir
 
-def get_code_files(repo_path: str, target_subpath: Optional[str] = None, max_size_bytes: int = 150000) -> str:
+def get_code_files(repo_path: str, target_subpath: Optional[str] = None, max_size_bytes: int = 500000) -> str:
     """
     Recursively finds and reads relevant source code files inside the repository,
     excluding tests, build folders, and dependency folders.
@@ -69,8 +69,8 @@ def get_code_files(repo_path: str, target_subpath: Optional[str] = None, max_siz
             ext = os.path.splitext(file)[1].lower()
             if ext in allowed_extensions:
                 file_path = os.path.join(root, file)
-                # Skip test files by name check
-                if 'test' in file.lower() or 'spec' in file.lower():
+                # Skip test files, system prompts, pricing knowledge bases and slide generators
+                if 'test' in file.lower() or 'spec' in file.lower() or 'prompts' in file.lower() or 'pptx' in file.lower() or 'pricing_kb' in file.lower():
                     continue
                 try:
                     file_size = os.path.getsize(file_path)
@@ -98,12 +98,38 @@ def cleanup_repo(repo_path: str):
 
 def validate_git_connection(git_url: str) -> bool:
     """
-    Checks if the Git repository URL is accessible and the credentials/token are valid
-    using git ls-remote.
+    Checks if the Git repository URL is accessible and the credentials/token are valid.
+    For public repos, git ls-remote succeeds anonymously even with a wrong token.
+    Therefore, we also explicitly validate the token using the hosting provider's API.
     """
     if not git_url:
         return True
     
+    # 1. Parse and validate the token via API if present
+    try:
+        import urllib.parse
+        import requests
+        
+        parsed = urllib.parse.urlparse(git_url)
+        host = parsed.hostname or ""
+        token = parsed.password or parsed.username
+        
+        # Check if credential looks like a token
+        if token and "@" in git_url:
+            if "github.com" in host.lower():
+                headers = {"Authorization": f"token {token}"}
+                response = requests.get("https://api.github.com/user", headers=headers, timeout=5)
+                if response.status_code == 401:
+                    return False
+            elif "gitlab.com" in host.lower():
+                headers = {"PRIVATE-TOKEN": token}
+                response = requests.get("https://gitlab.com/api/v4/user", headers=headers, timeout=5)
+                if response.status_code == 401:
+                    return False
+    except Exception:
+        pass # Fallback to git command if API call fails due to network/rate-limiting
+        
+    # 2. Run git command validation
     cmd = ["git", "-c", "credential.helper=", "ls-remote", git_url]
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import re
 from typing import List, Dict, Any
@@ -41,6 +42,119 @@ def extract_json_list(text: str) -> list:
         pass
         
     return []
+
+def extract_rules_from_text(text: str) -> list:
+    """
+    Parses conversational text lists of rules (e.g., BR-001: explanation)
+    and extracts them into JSON objects.
+    """
+    rules = []
+    pattern = re.compile(r'(?:BR|Rule)[-_\s]?(\d+)\s*[:\-]\s*(.*)', re.IGNORECASE)
+    seen_codes = set()
+    for line in text.splitlines():
+        line_strip = line.strip()
+        match = pattern.search(line_strip)
+        if match:
+            num = match.group(1)
+            desc = match.group(2).strip()
+            code = f"BR-{num.zfill(3)}"
+            if code not in seen_codes:
+                seen_codes.add(code)
+                rule_type = "BUSINESS_RULE"
+                lower_desc = desc.lower()
+                if "validate" in lower_desc or "validation" in lower_desc or "format" in lower_desc or "email" in lower_desc:
+                    rule_type = "VALIDATION_RULE"
+                elif "auth" in lower_desc or "security" in lower_desc or "password" in lower_desc or "token" in lower_desc or "lock" in lower_desc or "hash" in lower_desc:
+                    rule_type = "SECURITY_RULE"
+                elif "role" in lower_desc or "admin" in lower_desc or "permission" in lower_desc or "access" in lower_desc or "rbac" in lower_desc or "authorize" in lower_desc:
+                    rule_type = "AUTHORIZATION_RULE"
+                rules.append({
+                    "code": code,
+                    "text": desc,
+                    "type": rule_type
+                })
+    return rules
+
+def extract_services_from_text(text: str) -> list:
+    """
+    Parses conversational text descriptions of proposed services, methods and dependencies.
+    """
+    services = []
+    lines = text.splitlines()
+    current_service = None
+    
+    for line in lines:
+        line_strip = line.strip()
+        if not line_strip:
+            continue
+            
+        class_match = re.search(r'(?:^\d+\.|\*|-)?\s*([a-zA-Z0-9_]+Service)\b', line_strip)
+        if class_match:
+            current_service = {
+                "name": class_match.group(1),
+                "methods": [],
+                "dependencies": []
+            }
+            services.append(current_service)
+            continue
+            
+        if current_service:
+            if "method" in line_strip.lower() or "function" in line_strip.lower() or "(" in line_strip:
+                funcs = re.findall(r'\b([a-z0-9_]+)(?:\(\))?\b', line_strip)
+                for f in funcs:
+                    if f not in ["method", "methods", "function", "functions", "target", "to", "and"]:
+                        current_service["methods"].append(f)
+            if "depend" in line_strip.lower() or "mock" in line_strip.lower() or "@" in line_strip:
+                deps = re.findall(r'@?\b([A-Z][a-zA-Z0-9_]+)\b', line_strip)
+                for d in deps:
+                    if d not in ["Collaborators", "Mocks", "Dependencies", "Mocked", "Proposed", "Service"]:
+                        current_service["dependencies"].append(d)
+                        
+    return [s for s in services if s["name"]]
+
+def extract_services_from_code_context(code_context: str) -> list:
+    """
+    Parses the codebase context file-by-file to extract all classes and functions
+    as services and target methods without any capping limits.
+    """
+    if not code_context:
+        return []
+        
+    services = []
+    parts = code_context.split("=== File: ")
+    for part in parts:
+        if not part.strip():
+            continue
+            
+        lines = part.splitlines()
+        first_line = lines[0].strip()
+        filename = first_line.split(" ===")[0].strip()
+        content = "\n".join(lines[1:])
+        
+        class_names = re.findall(r'class\s+([a-zA-Z0-9_]+)\b', content)
+        class_names = list(dict.fromkeys(class_names))
+        
+        if class_names:
+            for c in class_names:
+                methods = re.findall(r'def\s+([a-zA-Z0-9_]+)\b', content)
+                methods = [m for m in methods if not m.startswith("_")]
+                if methods:
+                    services.append({
+                        "name": c,
+                        "methods": list(set(methods)),
+                        "dependencies": ["DatabaseRepository"]
+                    })
+        else:
+            funcs = re.findall(r'def\s+([a-zA-Z0-9_]+)\b', content)
+            funcs = [f for f in funcs if not f.startswith("_")]
+            if funcs:
+                services.append({
+                    "name": os.path.basename(filename),
+                    "methods": list(set(funcs)),
+                    "dependencies": ["DatabaseRepository"]
+                })
+                
+    return services
 
 def extract_json_dict(text: str) -> dict:
     """
@@ -644,38 +758,112 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
     rules_data = []
     try:
         llm = get_llm()
-        prompt = f"""
-        Analyze the following Sprint/Story description and the existing Git repository codebase context.
-        Identify the specific components/APIs and extract a list of granular business rules, security rules, validation rules, or authorization rules that need unit testing.
+        
+        # Split code context by file boundary
+        parts = code_context.split("=== File: ") if code_context else []
+        all_extracted_rules = []
+        rule_idx = 1
+        
+        target_files = []
+        for part in parts:
+            if not part.strip():
+                continue
+            lines = part.splitlines()
+            first_line = lines[0].strip()
+            filename = first_line.split(" ===")[0].strip()
+            content = "\n".join(lines[1:])
+            
+            # Target logic files (app.py, controllers, agents)
+            name_lower = filename.lower()
+            if "controller" in name_lower or "agent" in name_lower or filename == "app.py":
+                target_files.append((filename, content))
+                
+        # Run targeted rule extraction for each file
+        if target_files:
+            for filename, content in target_files:
+                await broadcast_log(session_id, f"[Requirement Decomposition] Extracting rules from {filename}...")
+                prompt = f"""
+                You are an elite QA Automation Architect.
+                Analyze the following code file `{filename}` and extract all testable business rules, validation bounds, access controls, and error paths defined in it.
 
-        --- SPRINT / STORY / REQUIREMENTS ---
-        {combined_artifacts}
+                --- RULES TO FOLLOW ---
+                - DO NOT return general file summaries, overview text, or introductory explanations.
+                - Extract ACTUAL, testable validations and logic gates (e.g. checking file size, empty strings, payload format).
+                - Limit rules to the logic present in this specific file.
+                
+                Examples of GOOD rules:
+                - "Validate that upload_case_study rejects files if the filename is empty."
+                - "Ensure calculate_budget raises a ValueError if the inputs are negative."
 
-        --- CODEBASE CONTEXT ---
-        {code_context}
+                --- FILE CONTENT ---
+                {content}
 
-        Return a JSON list of objects matching this schema EXACTLY:
-        [
-          {{
-            "code": "BR-001",
-            "text": "Detailed rule explanation detailing inputs, expected flow, mock constraints, etc.",
-            "type": "BUSINESS_RULE" // or "VALIDATION_RULE", "SECURITY_RULE", "AUTHORIZATION_RULE"
-          }}
-        ]
-        """
-        await broadcast_log(session_id, "[Requirement Decomposition] Generating business rules using LLM analysis...")
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
-        rules_data = extract_json_list(response.content)
+                --- RESPONSE FORMAT ---
+                Format your response EXACTLY as a JSON list matching this schema:
+                [
+                  {{
+                    "text": "Exact description of the validation check or rule.",
+                    "type": "VALIDATION_RULE" // Must be one of: BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
+                  }}
+                ]
+                """
+                try:
+                    response = await llm.ainvoke([HumanMessage(content=prompt)])
+                    file_rules = extract_json_list(response.content)
+                    if not file_rules:
+                        file_rules = extract_rules_from_text(response.content)
+                        
+                    for fr in file_rules:
+                        rule_text = fr.get("text", "").strip()
+                        # Clean and filter generic sentences
+                        if rule_text and not rule_text.startswith("This script") and not "overview of the" in rule_text.lower() and len(rule_text) > 15:
+                            all_extracted_rules.append({
+                                "code": f"BR-{str(rule_idx).zfill(3)}",
+                                "text": f"In {os.path.basename(filename)}: {rule_text}",
+                                "type": fr.get("type", "VALIDATION_RULE")
+                            })
+                            rule_idx += 1
+                except Exception:
+                    continue
+            rules_data = all_extracted_rules
+
+        # Fallback to single prompt LLM call on combined_artifacts if no rules were extracted file-by-file
+        if not rules_data:
+            await broadcast_log(session_id, "[Requirement Decomposition] Falling back to global rule extraction...")
+            prompt = f"""
+            You are an elite QA Automation Architect.
+            Your task is to analyze the sprint requirements to extract testable business rules, validation rules, security policies, and authorization constraints.
+
+            --- DEFINITIONS & GUIDELINES ---
+            - DO NOT extract generic descriptions or file introductions.
+            - Extract ACTUAL, testable business logic and validation criteria.
+
+            --- INPUT CONTEXT ---
+            [Sprint/Story/Requirements]:
+            {combined_artifacts}
+
+            --- RESPONSE FORMAT ---
+            Format your response EXACTLY as a JSON list matching this schema:
+            [
+              {{
+                "code": "BR-001",
+                "text": "Exact description of validation criteria and expected outcome.",
+                "type": "VALIDATION_RULE" // BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
+              }}
+            ]
+            """
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            rules_data = extract_json_list(response.content)
+            if not rules_data:
+                rules_data = extract_rules_from_text(response.content)
     except Exception as e:
-        await broadcast_log(session_id, f"[Requirement Decomposition Warning] LLM generation failed or returned invalid json: {str(e)}. Using fallback rules.")
+        await broadcast_log(session_id, f"[Requirement Decomposition Warning] Extraction failed: {str(e)}")
 
-    # Fallback if empty
+    # Absolute fallback
     if not rules_data:
+        repo_name = git_url.split('/')[-1].replace('.git', '') if git_url else 'Project'
         rules_data = [
-            {"code": "BR-001", "text": "User Registration: Email uniqueness validation (409 Conflict), BCrypt password hashing, default status PENDING_VERIFICATION, and async verification email dispatch.", "type": "VALIDATION_RULE"},
-            {"code": "BR-002", "text": "User Authentication: Password matching, increment failed attempts, lock account after 5 failed attempts (15 min cooldown), expired lockout auto-reset, issue JWT tokens.", "type": "SECURITY_RULE"},
-            {"code": "BR-003", "text": "User Profile Management: Fetch active profile DTO. Prevent lookup of soft-deleted users (404 Not Found). Validate phone number E.164 format.", "type": "BUSINESS_RULE"},
-            {"code": "BR-004", "text": "Soft Deletion & RBAC: Soft delete account by setting is_deleted=true and deleted_at timestamp. Require ROLE_ADMIN authority (403 Forbidden).", "type": "AUTHORIZATION_RULE"}
+            {"code": "BR-001", "text": f"Validate core business logic and workflows for {repo_name} components.", "type": "BUSINESS_RULE"}
         ]
 
     async with AsyncSessionLocal() as db:
@@ -731,43 +919,60 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
     try:
         llm = get_llm()
         prompt = f"""
-        Based on the following extracted business rules and codebase context:
-        
-        --- BUSINESS RULES ---
+        You are an elite QA Automation Architect and Software Engineer.
+        Your task is to analyze the extracted business rules and the existing codebase context to map the rules to their actual service classes, modules, and target methods that need unit test coverage.
+
+        --- CRITICAL INSTRUCTIONS ---
+        - DO NOT hallucinate class names, services, methods, or dependencies that DO NOT exist in the codebase context.
+        - The proposed "name" must match an actual class name, controller, or module filename in the codebase (e.g. "CaseStudyController" or "CaseStudyService").
+        - The proposed "methods" MUST match the exact function names/method signatures defined in the codebase context (e.g. if the code defines "def upload_case_study():", the method name must be "upload_case_study"). Do NOT rename them to Java CamelCase (e.g., do not turn "upload_case_study" into "uploadCaseStudy").
+        - The proposed "dependencies" must be the classes, helper clients, or database drivers injected or imported in those files.
+
+        --- INPUT CONTEXT ---
+        [Extracted Business Rules]:
         {rules_text}
         
-        --- CODEBASE CONTEXT ---
+        [Existing Codebase Context]:
         {code_context}
 
-        Identify the class boundaries or service interfaces that need to be tested.
-        Propose the methods that require unit test coverage, and identify their mock collaborator dependencies (e.g. database repositories, notification clients, cryptographers, etc.).
-
-        Return a JSON list of objects matching this schema EXACTLY:
+        --- RESPONSE FORMAT ---
+        Identify the correct classes/files and target methods.
+        Format your response EXACTLY as a JSON list matching this schema (do not output the example placeholder values 'ServiceClassName', 'methodName1'):
         [
           {{
-            "name": "ServiceClassName",
-            "methods": ["methodName1", "methodName2"],
-            "dependencies": ["CollaboratorClass1", "CollaboratorClass2"]
+            "name": "ActualClassOrModuleName",
+            "methods": ["actual_method_name_1", "actual_method_name_2"],
+            "dependencies": ["ActualDependency1", "ActualDependency2"]
           }}
         ]
         """
         await broadcast_log(session_id, "[Service Contract] Calling LLM to define service test boundaries...")
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         services_data = extract_json_list(response.content)
+        if not services_data:
+            # Fallback to regex-based text parsing if JSON parsing returned empty
+            services_data = extract_services_from_text(response.content)
+            
+        # Filter placeholders out if present in parsed result
+        if services_data:
+            has_placeholder = any("ServiceClassName" in s.get("name", "") or "methodName1" in s.get("methods", []) for s in services_data)
+            if has_placeholder:
+                services_data = [] # Discard and force fallback parsing
     except Exception as e:
         await broadcast_log(session_id, f"[Service Contract Warning] Proposing service boundaries failed: {str(e)}. Using fallback boundaries.")
 
+    # Dynamic fallback if empty or placeholder
     if not services_data:
+        services_data = extract_services_from_code_context(code_context)
+        
+    # Absolute fallback if still empty
+    if not services_data:
+        repo_name = git_url.split('/')[-1].replace('.git', '') if git_url else 'App'
         services_data = [
             {
-                "name": "UserService",
-                "methods": ["registerUser", "getUserById", "updateProfile", "deleteUser"],
-                "dependencies": ["UserRepository", "PasswordEncoder", "NotificationClient"]
-            },
-            {
-                "name": "AuthService",
-                "methods": ["authenticateUser", "refreshToken"],
-                "dependencies": ["UserRepository", "PasswordEncoder", "JwtTokenProvider"]
+                "name": f"{repo_name.title().replace('-', '').replace('_', '').replace('_', '')}Service",
+                "methods": ["process", "validate"],
+                "dependencies": ["DatabaseRepository"]
             }
         ]
 
@@ -861,13 +1066,59 @@ async def unit_test_design_node(state: AgentWorkflowState) -> AgentWorkflowState
                 await broadcast_log(session_id, f"[Test Design Warning] LLM generation failed for {s.name}: {str(e)}. Using fallback tests.")
 
             if not generated_code or len(generated_code) < 100:
-                if s.name == "UserService":
-                    generated_code = SAMPLE_USER_SERVICE_TEST
-                elif s.name == "AuthService":
-                    generated_code = SAMPLE_AUTH_SERVICE_TEST
+                lang_lower = tech_profile.get("language", "Java").lower()
+                framework = tech_profile.get("framework", "JUnit 5")
+                
+                if "java" in lang_lower:
+                    generated_code = f"""package com.example.service;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.InjectMocks;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+@ExtendWith(MockitoExtension.class)
+@DisplayName("{s.name} Fallback Unit Tests")
+public class {s.name}Test {{
+
+    @InjectMocks
+    private {s.name} targetService;
+
+    @BeforeEach
+    void setUp() {{
+        // Setup mock components
+    }}
+
+    @Test
+    @DisplayName("Verify target service component load")
+    void testServiceLoad() {{
+        // Assertions here
+    }}
+}}
+"""
+                elif "python" in lang_lower:
+                    generated_code = f"""import unittest
+from unittest.mock import Mock, patch
+
+class Test{s.name}(unittest.TestCase):
+    def setUp(self):
+        self.service = Mock()
+
+    def test_service_load(self):
+        self.assertIsNotNone(self.service)
+"""
                 else:
-                    # Generic fallback test shell
-                    generated_code = f"// Fallback test suite for {s.name}\n"
+                    generated_code = f"""// Dynamic Fallback test suite for {s.name}
+// Language: {tech_profile.get("language")}, Framework: {framework}
+describe('{s.name} Test Suite', () => {{
+    it('should initialize successfully', () => {{
+        expect(true).toBe(true);
+    }});
+}});
+"""
 
             ext = ".java" if tech_profile.get("language") == "Java" else ".py" if tech_profile.get("language") == "Python" else ".ts" if tech_profile.get("language") == "TypeScript" else ".cs" if tech_profile.get("language") == "C#" else ".js"
             test_name = f"{s.name}Test{ext}"
