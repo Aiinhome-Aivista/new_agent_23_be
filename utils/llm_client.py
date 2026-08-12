@@ -23,10 +23,13 @@ def get_llm():
             )
     else:
         # Local Mode
+        base_url = settings.MISTRAL_LOCAL_URL
+        if base_url and not base_url.endswith("/v1") and not base_url.endswith("/v1/"):
+            base_url = base_url.rstrip("/") + "/v1"
         return ChatOpenAI(
             model=settings.MISTRAL_LOCAL_MODEL,
             api_key="local",
-            base_url=settings.MISTRAL_LOCAL_URL,
+            base_url=base_url,
             temperature=0.2
         )
     

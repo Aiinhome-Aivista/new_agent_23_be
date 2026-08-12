@@ -1,11 +1,12 @@
 import io
 import zipfile
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import uuid
+from pydantic import BaseModel
 
 from database import get_db, AsyncSessionLocal
 from models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix
@@ -92,8 +93,36 @@ async def run_agent_workflow(session_id: str):
     except Exception as e:
         await broadcast_log(session_id, f"[Error] Agent Workflow Failed: {str(e)} [END_OF_STREAM]")
 
+class GitConfigRequest(BaseModel):
+    git_url: Optional[str] = None
+    git_branch: Optional[str] = None
+    git_path: Optional[str] = None
+
 @router.post("/sessions/{session_id}/decompose")
-async def trigger_decompose(session_id: str, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def trigger_decompose(
+    session_id: str, 
+    background_tasks: BackgroundTasks, 
+    payload: GitConfigRequest = Body(default=GitConfigRequest()), 
+    db: AsyncSession = Depends(get_db)
+):
+    if payload.git_url:
+        from utils.git_utils import validate_git_connection
+        if not validate_git_connection(payload.git_url):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid Git Repository URL or authentication token. Connection check failed."
+            )
+
+    result = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    session_obj = result.scalar_one_or_none()
+    if session_obj:
+        profile = dict(session_obj.tech_profile) if session_obj.tech_profile else {}
+        profile["git_url"] = payload.git_url
+        profile["git_branch"] = payload.git_branch
+        profile["git_path"] = payload.git_path
+        session_obj.tech_profile = profile
+        await db.commit()
+
     background_tasks.add_task(run_agent_workflow, session_id)
     return {"message": "Decomposition triggered. Connect to SSE stream for updates."}
 
