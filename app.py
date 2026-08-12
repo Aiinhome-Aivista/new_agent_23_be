@@ -17,24 +17,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import text
-
 @app.on_event("startup")
 async def startup_event():
-    # 1. Create the database automatically if it doesn't exist
     try:
-        base_engine = create_async_engine(settings.BASE_DATABASE_URL, isolation_level="AUTOCOMMIT")
-        async with base_engine.connect() as conn:
-            await conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{settings.MYSQL_NAME}`"))
-        await base_engine.dispose()
-        print(f"Database {settings.MYSQL_NAME} ensured.")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        print("Database schema initialized successfully.")
     except Exception as e:
-        print(f"Could not auto-create database (it might already exist): {e}")
-
-    # 2. Create the tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        print(f"Database startup warning: {e}")
 
 @app.get("/health")
 async def health_check():

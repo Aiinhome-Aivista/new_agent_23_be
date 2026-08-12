@@ -38,10 +38,18 @@ class Settings(BaseSettings):
     CHROMA_PORT: int = 8000
     VECTOR_COLLECTION_NAME: str = "unit_test_knowledge"
 
+    # SQLite Fallback
+    USE_SQLITE_FALLBACK: bool = True
+    SQLITE_DB_FILE: str = "utgc_agent.db"
+
+    @property
+    def SQLITE_DATABASE_URL(self) -> str:
+        return f"sqlite+aiosqlite:///{self.SQLITE_DB_FILE}"
+
     # LLM Providers
     MODE: str = "Cloud"
     MISTRAL_API_KEY: str = ""
-    MODEL_NAME: str = "mistral-small-latest"
+    MODEL_NAME: str = "mistral-small:24b"
     MISTRAL_LOCAL_URL: str = ""
     MISTRAL_LOCAL_MODEL: str = "mistral:latest"
     GEMINI_API_KEY: str = ""
