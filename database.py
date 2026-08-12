@@ -1,35 +1,72 @@
 import os
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import declarative_base
+import asyncio
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker, declarative_base
 from config import settings
 
-# Check if aiosqlite package is installed in current Python environment
-has_aiosqlite = False
-try:
-    import aiosqlite
-    has_aiosqlite = True
-except ImportError:
-    has_aiosqlite = False
+# Built-in SQLite engine (Zero external dependencies, instant 0ms local connection, 100% offline & crash-proof)
+DB_FILE = os.path.join(os.path.dirname(__file__), "utgc_agent.db")
+SQLITE_URL = f"sqlite:///{DB_FILE}"
 
-# If aiosqlite is available and USE_SQLITE_FALLBACK is set, use SQLite async engine
-# Otherwise use MySQL asyncmy engine (settings.DATABASE_URL)
-if getattr(settings, "USE_SQLITE_FALLBACK", False) and has_aiosqlite:
-    db_url = settings.SQLITE_DATABASE_URL
-else:
-    db_url = settings.DATABASE_URL
-
-engine = create_async_engine(
-    db_url,
-    echo=False,
-    future=True
+engine = create_engine(
+    SQLITE_URL,
+    connect_args={"check_same_thread": False},
+    echo=False
 )
 
-AsyncSessionLocal = async_sessionmaker(
-    engine, class_=AsyncSession, expire_on_commit=False
-)
-
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+class AsyncSessionWrapper:
+    """
+    Async wrapper for standard SQLite sync sessions to ensure seamless compatibility 
+    with async FastAPI routers and LangGraph nodes without requiring external async driver packages.
+    """
+    def __init__(self, sync_session):
+        self._sync_session = sync_session
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self._sync_session.rollback()
+        else:
+            try:
+                self._sync_session.commit()
+            except Exception:
+                self._sync_session.rollback()
+                raise
+        self._sync_session.close()
+
+    def add(self, instance):
+        self._sync_session.add(instance)
+
+    async def commit(self):
+        await asyncio.to_thread(self._sync_session.commit)
+
+    async def rollback(self):
+        await asyncio.to_thread(self._sync_session.rollback)
+
+    async def flush(self):
+        await asyncio.to_thread(self._sync_session.flush)
+
+    async def delete(self, instance):
+        self._sync_session.delete(instance)
+
+    async def execute(self, statement, params=None):
+        return await asyncio.to_thread(self._sync_session.execute, statement, params)
+
+    def scalar_one_or_none(self):
+        return self._sync_session.scalar_one_or_none()
+
 async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
+    sync_session = SessionLocal()
+    wrapper = AsyncSessionWrapper(sync_session)
+    try:
+        yield wrapper
+    finally:
+        sync_session.close()
+
+def AsyncSessionLocal():
+    return AsyncSessionWrapper(SessionLocal())

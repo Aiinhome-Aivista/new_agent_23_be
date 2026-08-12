@@ -14,25 +14,23 @@ from utils.broadcaster import subscribe_logs, broadcast_log
 from utils.doc_parser import parse_artifact_file
 from utils.docx_generator import generate_word_report_docx
 
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Body
+
 router = APIRouter()
 
 @router.post("/sessions")
-async def create_session(tech_profile: Dict[str, Any], db: AsyncSession = Depends(get_db)):
+async def create_session(tech_profile: Dict[str, Any] = Body(default={}), db: AsyncSession = Depends(get_db)):
     session_id = str(uuid.uuid4())
+    profile_data = tech_profile if tech_profile else {"language": "Java", "framework": "JUnit 5", "mockLibrary": "Mockito"}
     new_session = GenerationSession(
         session_id=session_id,
         user_id="default_user",
-        tech_profile=tech_profile,
+        tech_profile=profile_data,
         status="INITIALIZED"
     )
     db.add(new_session)
     await db.commit()
     return {"session_id": session_id, "status": "INITIALIZED"}
-    new_session = GenerationSession(tech_profile=tech_profile, status="INITIALIZED")
-    db.add(new_session)
-    await db.commit()
-    await db.refresh(new_session)
-    return {"session_id": str(new_session.session_id), "status": "INITIALIZED"}
 
 from sqlalchemy.future import select
 from models import GenerationSession
@@ -41,7 +39,7 @@ from models import GenerationSession
 async def get_sessions(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(GenerationSession).order_by(GenerationSession.created_at.desc()))
     sessions = result.scalars().all()
-    return {"sessions": [{"session_id": str(s.session_id), "status": s.status, "tech_profile": s.tech_profile, "created_at": s.created_at.isoformat()} for s in sessions]}
+    return {"sessions": [{"session_id": str(s.session_id), "status": s.status, "tech_profile": s.tech_profile, "created_at": s.created_at.isoformat() + "Z" if not s.created_at.isoformat().endswith("Z") else s.created_at.isoformat()} for s in sessions]}
 
 @router.post("/sessions/{session_id}/artifacts")
 async def upload_artifact(session_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
@@ -171,16 +169,38 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(UnitTest).join(ServiceContract).where(ServiceContract.session_id == session_id))
     tests = res.scalars().all()
 
+    # Fetch session tech profile & matrix for word report
+    sess_res = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    sess = sess_res.scalar_one_or_none()
+    tech_profile = sess.tech_profile if (sess and sess.tech_profile) else {"language": "Java", "framework": "JUnit 5"}
+
+    matrix_res = await db.execute(select(CoverageMatrix).where(CoverageMatrix.session_id == session_id))
+    matrix_items = matrix_res.scalars().all()
+    matrix_list = [
+        {"rule_code": m.rule_code, "rule_text": m.rule_text, "test_name": m.test_name, "status": m.status}
+        for m in matrix_items
+    ]
+
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        test_list = []
         if tests:
             for t in tests:
                 zip_file.writestr(t.test_name, t.code_content)
+                test_list.append({"service": t.test_name.replace("Test.java", ""), "code": t.code_content})
         else:
             # Fallback
             from agent.nodes import SAMPLE_USER_SERVICE_TEST, SAMPLE_AUTH_SERVICE_TEST
             zip_file.writestr("UserServiceTest.java", SAMPLE_USER_SERVICE_TEST)
             zip_file.writestr("AuthServiceTest.java", SAMPLE_AUTH_SERVICE_TEST)
+            test_list = [
+                {"service": "UserService", "code": SAMPLE_USER_SERVICE_TEST},
+                {"service": "AuthService", "code": SAMPLE_AUTH_SERVICE_TEST}
+            ]
+
+        # Generate Word report and include it inside the ZIP package
+        docx_bytes = generate_word_report_docx(session_id, tech_profile, matrix_list, test_list)
+        zip_file.writestr(f"Test_Execution_Report_{session_id[:8]}.docx", docx_bytes)
 
     zip_buffer.seek(0)
     return StreamingResponse(
