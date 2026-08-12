@@ -11,7 +11,20 @@ router = APIRouter()
 
 @router.post("/sessions")
 async def create_session(tech_profile: Dict[str, Any], db: AsyncSession = Depends(get_db)):
-    return {"session_id": str(uuid.uuid4()), "status": "INITIALIZED"}
+    new_session = GenerationSession(tech_profile=tech_profile, status="INITIALIZED")
+    db.add(new_session)
+    await db.commit()
+    await db.refresh(new_session)
+    return {"session_id": str(new_session.session_id), "status": "INITIALIZED"}
+
+from sqlalchemy.future import select
+from models import GenerationSession
+
+@router.get("/sessions")
+async def get_sessions(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(GenerationSession).order_by(GenerationSession.created_at.desc()))
+    sessions = result.scalars().all()
+    return {"sessions": [{"session_id": str(s.session_id), "status": s.status, "tech_profile": s.tech_profile, "created_at": s.created_at.isoformat()} for s in sessions]}
 
 @router.post("/sessions/{session_id}/artifacts")
 async def upload_artifact(session_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
