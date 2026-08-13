@@ -3,7 +3,7 @@ import asyncio
 from sqlalchemy import create_engine, select, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
-from config import settings
+from database.config import settings
 
 # Built-in SQLite engine (Zero external dependencies, instant 0ms local connection, 100% offline & crash-proof)
 DB_FILE = os.path.join(os.path.dirname(__file__), "utgc_agent.db")

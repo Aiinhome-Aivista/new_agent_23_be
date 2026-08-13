@@ -10,8 +10,8 @@ from utils.ast_validator import validate_syntax
 from utils.security import scan_for_secrets, redact_secrets, detect_prompt_injection
 from utils.doc_parser import parse_artifact_file
 from langchain_core.messages import HumanMessage
-from database import AsyncSessionLocal
-from models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix
+from database.database import AsyncSessionLocal
+from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix
 from sqlalchemy import select
 from utils.git_utils import clone_repo, get_code_files, cleanup_repo
 
@@ -1026,51 +1026,62 @@ async def unit_test_design_node(state: AgentWorkflowState) -> AgentWorkflowState
     rules_text = "\n".join([f"- {r['rule_code']}: {r['rule_text']}" for r in state.get("parsed_requirements", [])])
     
     state["generated_tests"] = []
+    
+    # 1. Fetch services in a short-lived transaction to avoid locking DB during LLM calls
+    services_list = []
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(ServiceContract).where(ServiceContract.session_id == session_id))
-        services = result.scalars().all()
-        
-        for s in services:
-            old_tests = await db.execute(select(UnitTest).where(UnitTest.service_id == s.service_id))
+        for s in result.scalars().all():
+            services_list.append({
+                "service_id": s.service_id,
+                "name": s.name,
+                "methods": s.methods,
+                "dependencies": s.dependencies
+            })
+            
+    # 2. Iterate services outside of DB lock
+    for s_dict in services_list:
+        async with AsyncSessionLocal() as db:
+            old_tests = await db.execute(select(UnitTest).where(UnitTest.service_id == s_dict['service_id']))
             for ot in old_tests.scalars().all():
                 await db.delete(ot)
-            await db.flush()
+            await db.commit()
 
-            generated_code = ""
-            try:
-                llm = get_llm()
-                prompt = f"""
-                Generate comprehensive, enterprise-grade unit tests for the service class: {s.name}.
-                The tests must match this technology profile:
-                - Language: {tech_profile.get('language')}
-                - Framework: {tech_profile.get('framework')}
-                - Mocking Library: {tech_profile.get('mockLibrary')}
+        generated_code = ""
+        try:
+            llm = get_llm()
+            prompt = f"""
+            Generate comprehensive, enterprise-grade unit tests for the service class: {s_dict['name']}.
+            The tests must match this technology profile:
+            - Language: {tech_profile.get('language')}
+            - Framework: {tech_profile.get('framework')}
+            - Mocking Library: {tech_profile.get('mockLibrary')}
 
-                The tests should cover these business rules:
-                {rules_text}
+            The tests should cover these business rules:
+            {rules_text}
 
-                Methods to test: {s.methods}
-                Mock collaborators / dependencies: {s.dependencies}
+            Methods to test: {s_dict['methods']}
+            Mock collaborators / dependencies: {s_dict['dependencies']}
 
-                --- EXISTING CODEBASE CONTEXT ---
-                {code_context}
+            --- EXISTING CODEBASE CONTEXT ---
+            {code_context}
 
-                Ensure you write clean, compilable, and self-contained unit test code following standard Arrange-Act-Assert (AAA) pattern.
-                Mock all the dependencies.
-                Return ONLY valid unit test code without any markdown code block wrap or formatting fences.
-                """
-                await broadcast_log(session_id, f"[Test Design] Calling LLM for unit test generation of {s.name} ...")
-                response = await llm.ainvoke([HumanMessage(content=prompt)])
-                generated_code = response.content.replace("```java", "").replace("```python", "").replace("```javascript", "").replace("```typescript", "").replace("```", "").strip()
-            except Exception as e:
-                await broadcast_log(session_id, f"[Test Design Warning] LLM generation failed for {s.name}: {str(e)}. Using fallback tests.")
+            Ensure you write clean, compilable, and self-contained unit test code following standard Arrange-Act-Assert (AAA) pattern.
+            Mock all the dependencies.
+            Return ONLY valid unit test code without any markdown code block wrap or formatting fences.
+            """
+            await broadcast_log(session_id, f"[Test Design] Calling LLM for unit test generation of {s_dict['name']} ...")
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            generated_code = response.content.replace("```java", "").replace("```python", "").replace("```javascript", "").replace("```typescript", "").replace("```", "").strip()
+        except Exception as e:
+            await broadcast_log(session_id, f"[Test Design Warning] LLM generation failed for {s_dict['name']}: {str(e)}. Using fallback tests.")
 
-            if not generated_code or len(generated_code) < 100:
-                lang_lower = tech_profile.get("language", "Java").lower()
-                framework = tech_profile.get("framework", "JUnit 5")
-                
-                if "java" in lang_lower:
-                    generated_code = f"""package com.example.service;
+        if not generated_code or len(generated_code) < 100:
+            lang_lower = tech_profile.get("language", "Java").lower()
+            framework = tech_profile.get("framework", "JUnit 5")
+            
+            if "java" in lang_lower:
+                generated_code = f"""package com.example.service;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -1081,11 +1092,11 @@ import org.mockito.InjectMocks;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
-@DisplayName("{s.name} Fallback Unit Tests")
-public class {s.name}Test {{
+@DisplayName("{s_dict['name']} Fallback Unit Tests")
+public class {s_dict['name']}Test {{
 
     @InjectMocks
-    private {s.name} targetService;
+    private {s_dict['name']} targetService;
 
     @BeforeEach
     void setUp() {{
@@ -1099,47 +1110,46 @@ public class {s.name}Test {{
     }}
 }}
 """
-                elif "python" in lang_lower:
-                    generated_code = f"""import unittest
+            elif "python" in lang_lower:
+                generated_code = f"""import unittest
 from unittest.mock import Mock, patch
 
-class Test{s.name}(unittest.TestCase):
+class Test{s_dict['name']}(unittest.TestCase):
     def setUp(self):
         self.service = Mock()
 
     def test_service_load(self):
         self.assertIsNotNone(self.service)
 """
-                else:
-                    generated_code = f"""// Dynamic Fallback test suite for {s.name}
+            else:
+                generated_code = f"""// Dynamic Fallback test suite for {s_dict['name']}
 // Language: {tech_profile.get("language")}, Framework: {framework}
-describe('{s.name} Test Suite', () => {{
+describe('{s_dict['name']} Test Suite', () => {{
     it('should initialize successfully', () => {{
         expect(true).toBe(true);
     }});
 }});
 """
 
-            ext = ".java" if tech_profile.get("language") == "Java" else ".py" if tech_profile.get("language") == "Python" else ".ts" if tech_profile.get("language") == "TypeScript" else ".cs" if tech_profile.get("language") == "C#" else ".js"
-            test_name = f"{s.name}Test{ext}"
+        ext = ".java" if tech_profile.get("language") == "Java" else ".py" if tech_profile.get("language") == "Python" else ".ts" if tech_profile.get("language") == "TypeScript" else ".cs" if tech_profile.get("language") == "C#" else ".js"
+        test_name = f"{s_dict['name']}Test{ext}"
 
+        async with AsyncSessionLocal() as db:
             unit_test = UnitTest(
-                service_id=s.service_id,
+                service_id=s_dict['service_id'],
                 test_name=test_name,
                 code_content=generated_code,
                 target_rule_ids=[r['rule_code'] for r in state.get("parsed_requirements", [])],
                 framework=tech_profile.get("framework", "JUnit 5")
             )
             db.add(unit_test)
-            await db.flush()
+            await db.commit()
 
-            state["generated_tests"].append({
-                "service": s.name,
-                "code": generated_code,
-                "test_name": test_name
-            })
-            
-        await db.commit()
+        state["generated_tests"].append({
+            "service": s_dict['name'],
+            "code": generated_code,
+            "test_name": test_name
+        })
 
     # Syntax Validation of the first generated code for safety
     if state["generated_tests"]:

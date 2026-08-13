@@ -3,8 +3,8 @@ import uuid
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, EmailStr
-from database import AsyncSessionLocal
-from models import UserAccount
+from database.database import AsyncSessionLocal
+from database.models import UserAccount
 from sqlalchemy import select
 
 router = APIRouter()

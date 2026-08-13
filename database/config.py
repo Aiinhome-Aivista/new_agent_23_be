@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # SQLite Fallback
     USE_SQLITE_FALLBACK: bool = True
-    SQLITE_DB_FILE: str = "utgc_agent.db"
+    SQLITE_DB_FILE: str = "database/utgc_agent.db"
 
     @property
     def SQLITE_DATABASE_URL(self) -> str:

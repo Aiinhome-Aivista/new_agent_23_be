@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from config import settings
-from database import engine, Base
+from database.config import settings
+from database.database import engine, Base
 from routers import sessions, auth
 
 app = FastAPI(

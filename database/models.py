@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import Column, String, DateTime, ForeignKey, Text
 from sqlalchemy.types import TypeDecorator, TEXT
 from sqlalchemy.orm import relationship
-from database import Base
+from database.database import Base
 
 class JSONEncodedDict(TypeDecorator):
     """

@@ -8,8 +8,8 @@ from sqlalchemy import select
 import uuid
 from pydantic import BaseModel
 
-from database import get_db, AsyncSessionLocal
-from models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix
+from database.database import get_db, AsyncSessionLocal
+from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix
 from agent.workflow import agent_workflow
 from utils.broadcaster import subscribe_logs, broadcast_log
 from utils.doc_parser import parse_artifact_file
@@ -34,7 +34,7 @@ async def create_session(tech_profile: Dict[str, Any] = Body(default={}), db: As
     return {"session_id": session_id, "status": "INITIALIZED"}
 
 from sqlalchemy.future import select
-from models import GenerationSession
+from database.models import GenerationSession
 
 @router.get("/sessions")
 async def get_sessions(db: AsyncSession = Depends(get_db)):
@@ -229,7 +229,7 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
         else:
             # Dynamic Fallback: fetch proposed services
             from sqlalchemy import select
-            from models import ServiceContract
+            from database.models import ServiceContract
             serv_res = await db.execute(select(ServiceContract).where(ServiceContract.session_id == session_id))
             services = serv_res.scalars().all()
             
