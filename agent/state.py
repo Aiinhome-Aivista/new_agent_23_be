@@ -13,3 +13,5 @@ class AgentWorkflowState(TypedDict):
     current_node: str
     human_feedback: Optional[str]
     target_service_id: Optional[str]
+    review_report: Optional[Dict[str, Any]]
+

@@ -49,6 +49,8 @@ class GenerationSession(Base):
     artifacts = relationship("Artifact", back_populates="session", cascade="all, delete-orphan")
     decompositions = relationship("RequirementDecomposition", back_populates="session", cascade="all, delete-orphan")
     services = relationship("ServiceContract", back_populates="session", cascade="all, delete-orphan")
+    review_reports = relationship("ReviewReport", back_populates="session", cascade="all, delete-orphan")
+
 
 class Artifact(Base):
     __tablename__ = "artifacts"
@@ -107,3 +109,15 @@ class CoverageMatrix(Base):
     test_name = Column(String(255), nullable=True)
     status = Column(String(50), default="COVERED")
     reviewer_decision = Column(Text, nullable=True)
+
+class ReviewReport(Base):
+    __tablename__ = "review_reports"
+    report_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("generation_sessions.session_id"))
+    summary = Column(Text, nullable=True)
+    status = Column(String(50), default="PASSED") # PASSED, ISSUES_FOUND
+    findings = Column(JSONEncodedDict, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("GenerationSession", back_populates="review_reports")
+

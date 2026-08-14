@@ -9,7 +9,7 @@ import uuid
 from pydantic import BaseModel
 
 from database.database import get_db, AsyncSessionLocal
-from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix
+from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix, ReviewReport
 from agent.workflow import agent_workflow
 from utils.broadcaster import subscribe_logs, broadcast_log
 from utils.doc_parser import parse_artifact_file
@@ -185,6 +185,24 @@ async def get_coverage_matrix(session_id: str, db: AsyncSession = Depends(get_db
         } for i in items
     ]}
 
+@router.get("/sessions/{session_id}/review-report")
+async def get_review_report(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ReviewReport).where(ReviewReport.session_id == session_id))
+    report = result.scalar_one_or_none()
+    if not report:
+        return {"report": None}
+    return {
+        "report": {
+            "report_id": report.report_id,
+            "session_id": report.session_id,
+            "summary": report.summary,
+            "status": report.status,
+            "findings": report.findings,
+            "created_at": report.created_at.isoformat() if report.created_at else None
+        }
+    }
+
+
 @router.post("/sessions/{session_id}/review/resolve")
 async def resolve_review(session_id: str, feedback: Dict[str, Any], db: AsyncSession = Depends(get_db)):
     # Save feedback & mark matrix entries
@@ -218,6 +236,14 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
         {"rule_code": m.rule_code, "rule_text": m.rule_text, "test_name": m.test_name, "status": m.status}
         for m in matrix_items
     ]
+
+    report_res = await db.execute(select(ReviewReport).where(ReviewReport.session_id == session_id))
+    report = report_res.scalar_one_or_none()
+    review_report_data = {
+        "summary": report.summary,
+        "status": report.status,
+        "findings": report.findings
+    } if report else None
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -253,7 +279,7 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
                 test_list.append({"service": "Generated", "code": fallback_code})
 
         # Generate Word report and include it inside the ZIP package
-        docx_bytes = generate_word_report_docx(session_id, tech_profile, matrix_list, test_list)
+        docx_bytes = generate_word_report_docx(session_id, tech_profile, matrix_list, test_list, review_report_data)
         zip_file.writestr(f"Test_Execution_Report_{session_id[:8]}.docx", docx_bytes)
 
     zip_buffer.seek(0)
@@ -283,7 +309,15 @@ async def download_report(session_id: str, db: AsyncSession = Depends(get_db)):
         for t in test_items
     ]
 
-    docx_bytes = generate_word_report_docx(session_id, tech_profile, matrix_list, test_list)
+    report_res = await db.execute(select(ReviewReport).where(ReviewReport.session_id == session_id))
+    report = report_res.scalar_one_or_none()
+    review_report_data = {
+        "summary": report.summary,
+        "status": report.status,
+        "findings": report.findings
+    } if report else None
+
+    docx_bytes = generate_word_report_docx(session_id, tech_profile, matrix_list, test_list, review_report_data)
 
     return StreamingResponse(
         io.BytesIO(docx_bytes),
