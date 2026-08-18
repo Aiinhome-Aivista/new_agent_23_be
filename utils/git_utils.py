@@ -21,7 +21,7 @@ def clone_repo(git_url: str, branch: Optional[str] = None) -> str:
     Clones a Git repository to a temporary directory and returns the absolute path.
     """
     temp_dir = tempfile.mkdtemp(prefix="utgc_git_")
-    cmd = ["git", "-c", "credential.helper=", "clone", "--depth", "1"]
+    cmd = ["git", "-c", "credential.helper=", "clone"]
     if branch:
         cmd.extend(["-b", branch])
     cmd.extend([git_url, temp_dir])
@@ -34,6 +34,40 @@ def clone_repo(git_url: str, branch: Optional[str] = None) -> str:
         shutil.rmtree(temp_dir, onerror=on_rm_error)
         raise Exception(f"Failed to clone repository: {result.stderr or result.stdout}")
     return temp_dir
+
+def get_repo_head_commit(repo_path: str) -> str:
+    """
+    Retrieves the current HEAD commit hash of the repository.
+    """
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_path, capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+def get_modified_files(repo_path: str, since_commit: str, to_commit: str) -> list:
+    """
+    Gets files changed/added between two commits using git diff --name-only.
+    """
+    try:
+        check_since = subprocess.run(["git", "cat-file", "-t", since_commit], cwd=repo_path, capture_output=True)
+        check_to = subprocess.run(["git", "cat-file", "-t", to_commit], cwd=repo_path, capture_output=True)
+        if check_since.returncode != 0 or check_to.returncode != 0:
+            return []
+            
+        result = subprocess.run(
+            ["git", "diff", "--name-only", since_commit, to_commit],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except Exception:
+        pass
+    return []
 
 def get_code_files(repo_path: str, target_subpath: Optional[str] = None, max_size_bytes: int = 500000) -> str:
     """

@@ -42,6 +42,26 @@ async def get_sessions(db: AsyncSession = Depends(get_db)):
     sessions = result.scalars().all()
     return {"sessions": [{"session_id": str(s.session_id), "status": s.status, "tech_profile": s.tech_profile, "created_at": s.created_at.isoformat() + "Z" if not s.created_at.isoformat().endswith("Z") else s.created_at.isoformat()} for s in sessions]}
 
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    session_obj = result.scalar_one_or_none()
+    if not session_obj:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    # Get associated artifacts
+    from database.models import Artifact
+    art_result = await db.execute(select(Artifact).where(Artifact.session_id == session_id))
+    artifacts = art_result.scalars().all()
+    
+    return {
+        "session_id": str(session_obj.session_id),
+        "status": session_obj.status,
+        "tech_profile": session_obj.tech_profile,
+        "created_at": session_obj.created_at.isoformat() if session_obj.created_at else None,
+        "artifacts": [{"artifact_id": str(a.artifact_id), "filename": a.filename, "file_type": a.file_type} for a in artifacts]
+    }
+
 @router.post("/sessions/{session_id}/artifacts")
 async def upload_artifact(session_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     # Check session

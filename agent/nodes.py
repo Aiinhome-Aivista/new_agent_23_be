@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 from database.database import AsyncSessionLocal
 from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix, ReviewReport
 from sqlalchemy import select
-from utils.git_utils import clone_repo, get_code_files, cleanup_repo
+from utils.git_utils import clone_repo, get_code_files, cleanup_repo, get_repo_head_commit, get_modified_files
 
 def extract_json_list(text: str) -> list:
     """
@@ -734,13 +734,69 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
     git_url = tech_profile.get("git_url")
     git_branch = tech_profile.get("git_branch")
     git_path = tech_profile.get("git_path")
+    last_processed_commit = tech_profile.get("last_processed_commit")
 
     code_context = ""
+    state["is_incremental"] = False
+    state["current_commit"] = None
+
     if git_url:
         await broadcast_log(session_id, f"[Git Integration] Connecting to Git repository: {git_url} ...")
         try:
             temp_path = clone_repo(git_url, branch=git_branch)
-            code_context = get_code_files(temp_path, target_subpath=git_path)
+            current_commit = get_repo_head_commit(temp_path)
+            state["current_commit"] = current_commit
+            
+            # Check if we should do incremental logic
+            if last_processed_commit and current_commit and last_processed_commit != current_commit:
+                modified_files = get_modified_files(temp_path, last_processed_commit, current_commit)
+                if modified_files:
+                    state["is_incremental"] = True
+                    await broadcast_log(session_id, f"[Git Integration] Incremental mode detected! {len(modified_files)} file(s) modified since last processed commit: {last_processed_commit[:7]}")
+                    
+                    # Read only the modified / added files
+                    allowed_extensions = {
+                        '.java', '.py', '.ts', '.tsx', '.cs', '.js', '.go', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.m'
+                    }
+                    exclude_dirs = {
+                        '.git', 'node_modules', 'venv', 'env', 'build', 'target', 'dist', 
+                        'test', 'tests', '__pycache__', '.idea', '.vscode', 'gradle', '.settings', 'bin', 'obj'
+                    }
+                    
+                    code_context_parts = []
+                    for rel_file in modified_files:
+                        norm_rel = rel_file.replace("\\", "/")
+                        if git_path:
+                            clean_git_path = git_path.strip("/\\").replace("\\", "/")
+                            if not norm_rel.startswith(clean_git_path):
+                                continue
+                                
+                        ext = os.path.splitext(norm_rel)[1].lower()
+                        if ext not in allowed_extensions:
+                            continue
+                            
+                        path_parts = norm_rel.lower().split("/")
+                        if any(part in exclude_dirs or 'test' in part for part in path_parts):
+                            continue
+                            
+                        file_path = os.path.join(temp_path, norm_rel)
+                        if os.path.exists(file_path) and os.path.isfile(file_path):
+                            try:
+                                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                    content = f.read()
+                                code_context_parts.append(f"=== File: {norm_rel} ===\n{content}\n")
+                            except Exception:
+                                pass
+                                
+                    code_context = "\n".join(code_context_parts)
+                    if not code_context:
+                        code_context = get_code_files(temp_path, target_subpath=git_path)
+                        state["is_incremental"] = False
+                else:
+                    code_context = get_code_files(temp_path, target_subpath=git_path)
+            else:
+                code_context = get_code_files(temp_path, target_subpath=git_path)
+                
             cleanup_repo(temp_path)
             await broadcast_log(session_id, f"[Git Integration] Successfully cloned and scanned codebase context.")
         except Exception as e:
@@ -977,9 +1033,13 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
         ]
 
     async with AsyncSessionLocal() as db:
+        is_incremental = state.get("is_incremental", False)
+        proposed_names = {s.get("name") for s in services_data if s.get("name")}
+        
         existing = await db.execute(select(ServiceContract).where(ServiceContract.session_id == session_id))
         for item in existing.scalars().all():
-            await db.delete(item)
+            if not is_incremental or item.name in proposed_names:
+                await db.delete(item)
         await db.flush()
 
         state["service_contracts"] = []
@@ -1039,8 +1099,15 @@ async def unit_test_design_node(state: AgentWorkflowState) -> AgentWorkflowState
                 "dependencies": s.dependencies
             })
             
+    is_incremental = state.get("is_incremental", False)
+    newly_proposed_names = {s["name"] for s in state.get("service_contracts", [])}
+
     # 2. Iterate services outside of DB lock
     for s_dict in services_list:
+        if is_incremental and s_dict["name"] not in newly_proposed_names:
+            await broadcast_log(session_id, f"[Test Design] Skipping test generation for unmodified service: {s_dict['name']}")
+            continue
+
         async with AsyncSessionLocal() as db:
             old_tests = await db.execute(select(UnitTest).where(UnitTest.service_id == s_dict['service_id']))
             for ot in old_tests.scalars().all():
@@ -1390,6 +1457,10 @@ async def test_pack_output_node(state: AgentWorkflowState) -> AgentWorkflowState
         sess = sess_res.scalar_one_or_none()
         if sess:
             sess.status = "GENERATED"
+            if state.get("current_commit"):
+                profile = dict(sess.tech_profile) if sess.tech_profile else {}
+                profile["last_processed_commit"] = state["current_commit"]
+                sess.tech_profile = profile
             await db.commit()
 
     state["current_node"] = "test_pack_output"
