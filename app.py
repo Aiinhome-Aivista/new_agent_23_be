@@ -2,8 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database.config import settings
 from database.database import engine, Base
-from routers import sessions, auth
-
+from routers import sessions, auth, jira
 app = FastAPI(
     title="Unit-Test Case Generator Agent Backend",
     version="1.0.0",
@@ -34,6 +33,7 @@ async def health_check():
 
 app.include_router(sessions.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(jira.router, prefix="/api/v1/jira", tags=["Jira"])
 
 if __name__ == "__main__":
     import uvicorn
