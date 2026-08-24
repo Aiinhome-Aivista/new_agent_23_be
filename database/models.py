@@ -71,6 +71,8 @@ class RequirementDecomposition(Base):
     rule_text = Column(Text)
     rule_type = Column(String(50))
     source_reference = Column(String(255))
+    story_name = Column(String(255), nullable=True)
+    story = Column(Text, nullable=True)
 
     session = relationship("GenerationSession", back_populates="decompositions")
 
@@ -109,6 +111,8 @@ class CoverageMatrix(Base):
     test_name = Column(String(255), nullable=True)
     status = Column(String(50), default="COVERED")
     reviewer_decision = Column(Text, nullable=True)
+    story_name = Column(String(255), nullable=True)
+    story = Column(Text, nullable=True)
 
 class ReviewReport(Base):
     __tablename__ = "review_reports"

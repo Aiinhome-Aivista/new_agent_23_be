@@ -253,7 +253,16 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
     matrix_res = await db.execute(select(CoverageMatrix).where(CoverageMatrix.session_id == session_id))
     matrix_items = matrix_res.scalars().all()
     matrix_list = [
-        {"rule_code": m.rule_code, "rule_text": m.rule_text, "test_name": m.test_name, "status": m.status}
+        {
+            "rule_code": m.rule_code, 
+            "rule_text": m.rule_text, 
+            "test_name": m.test_name, 
+            "status": m.status,
+            "story_id": m.rule_code,
+            "story": m.story,
+            "story_name": m.story_name,
+            "script_function_name": m.service_name
+        }
         for m in matrix_items
     ]
 
@@ -318,7 +327,16 @@ async def download_report(session_id: str, db: AsyncSession = Depends(get_db)):
     matrix_res = await db.execute(select(CoverageMatrix).where(CoverageMatrix.session_id == session_id))
     matrix_items = matrix_res.scalars().all()
     matrix_list = [
-        {"rule_code": m.rule_code, "rule_text": m.rule_text, "test_name": m.test_name, "status": m.status}
+        {
+            "rule_code": m.rule_code, 
+            "rule_text": m.rule_text, 
+            "test_name": m.test_name, 
+            "status": m.status,
+            "story_id": m.rule_code,
+            "story": m.story,
+            "story_name": m.story_name,
+            "script_function_name": m.service_name
+        }
         for m in matrix_items
     ]
 
