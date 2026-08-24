@@ -728,6 +728,23 @@ async def artifact_intake_node(state: AgentWorkflowState) -> AgentWorkflowState:
 
 async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
     session_id = state['session_id']
+    
+    async with AsyncSessionLocal() as db:
+        existing = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
+        existing_items = existing.scalars().all()
+        if existing_items:
+            await broadcast_log(session_id, f"[Requirement Decomposition] Found {len(existing_items)} existing rules. Skipping extraction.")
+            state["parsed_requirements"] = []
+            for decomp in existing_items:
+                state["parsed_requirements"].append({
+                    "req_id": decomp.req_id,
+                    "rule_code": decomp.rule_code,
+                    "rule_text": decomp.rule_text,
+                    "rule_type": decomp.rule_type
+                })
+            state["current_node"] = "decomposition"
+            return state
+
     await broadcast_log(session_id, "[Requirement Decomposition] Decomposing requirements into granular business rules and validation cases...")
 
     tech_profile = state.get("tech_profile") or {}
@@ -929,11 +946,6 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
         ]
 
     async with AsyncSessionLocal() as db:
-        existing = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
-        for item in existing.scalars().all():
-            await db.delete(item)
-        await db.flush()
-
         state["parsed_requirements"] = []
         for r in rules_data:
             decomp = RequirementDecomposition(
