@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 import uuid
 from pydantic import BaseModel
 
@@ -143,8 +143,35 @@ async def trigger_decompose(
         session_obj.tech_profile = profile
         await db.commit()
 
+    # Clear existing decompositions before new extraction
+    await db.execute(delete(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
+    await db.commit()
+
     background_tasks.add_task(run_agent_workflow, session_id)
     return {"message": "Decomposition triggered. Connect to SSE stream for updates."}
+
+class ManualRuleRequest(BaseModel):
+    rule_code: str
+    rule_text: str
+    rule_type: str = "BUSINESS_RULE"
+    story_name: Optional[str] = None
+    story: Optional[str] = None
+
+@router.post("/sessions/{session_id}/decompositions")
+async def add_manual_rule(session_id: str, rule: ManualRuleRequest, db: AsyncSession = Depends(get_db)):
+    decomp = RequirementDecomposition(
+        session_id=session_id,
+        rule_code=rule.rule_code,
+        rule_text=rule.rule_text,
+        rule_type=rule.rule_type,
+        story_name=rule.story_name,
+        story=rule.story,
+        source_reference="Manual_Entry"
+    )
+    db.add(decomp)
+    await db.commit()
+    return {"message": "Rule added successfully", "req_id": decomp.req_id}
+
 
 @router.get("/sessions/{session_id}/decompositions")
 async def get_decompositions(session_id: str, db: AsyncSession = Depends(get_db)):
@@ -255,7 +282,16 @@ async def download_zip(session_id: str, db: AsyncSession = Depends(get_db)):
     matrix_res = await db.execute(select(CoverageMatrix).where(CoverageMatrix.session_id == session_id))
     matrix_items = matrix_res.scalars().all()
     matrix_list = [
-        {"rule_code": m.rule_code, "rule_text": m.rule_text, "test_name": m.test_name, "status": m.status}
+        {
+            "rule_code": m.rule_code, 
+            "rule_text": m.rule_text, 
+            "test_name": m.test_name, 
+            "status": m.status,
+            "story_id": m.rule_code,
+            "story": m.story,
+            "story_name": m.story_name,
+            "script_function_name": m.service_name
+        }
         for m in matrix_items
     ]
 
@@ -320,7 +356,16 @@ async def download_report(session_id: str, db: AsyncSession = Depends(get_db)):
     matrix_res = await db.execute(select(CoverageMatrix).where(CoverageMatrix.session_id == session_id))
     matrix_items = matrix_res.scalars().all()
     matrix_list = [
-        {"rule_code": m.rule_code, "rule_text": m.rule_text, "test_name": m.test_name, "status": m.status}
+        {
+            "rule_code": m.rule_code, 
+            "rule_text": m.rule_text, 
+            "test_name": m.test_name, 
+            "status": m.status,
+            "story_id": m.rule_code,
+            "story": m.story,
+            "story_name": m.story_name,
+            "script_function_name": m.service_name
+        }
         for m in matrix_items
     ]
 

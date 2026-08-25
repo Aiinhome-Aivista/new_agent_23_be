@@ -728,6 +728,23 @@ async def artifact_intake_node(state: AgentWorkflowState) -> AgentWorkflowState:
 
 async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
     session_id = state['session_id']
+    
+    async with AsyncSessionLocal() as db:
+        existing = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
+        existing_items = existing.scalars().all()
+        if existing_items:
+            await broadcast_log(session_id, f"[Requirement Decomposition] Found {len(existing_items)} existing rules. Skipping extraction.")
+            state["parsed_requirements"] = []
+            for decomp in existing_items:
+                state["parsed_requirements"].append({
+                    "req_id": decomp.req_id,
+                    "rule_code": decomp.rule_code,
+                    "rule_text": decomp.rule_text,
+                    "rule_type": decomp.rule_type
+                })
+            state["current_node"] = "decomposition"
+            return state
+
     await broadcast_log(session_id, "[Requirement Decomposition] Decomposing requirements into granular business rules and validation cases...")
 
     tech_profile = state.get("tech_profile") or {}
@@ -884,6 +901,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 Format your response EXACTLY as a JSON list matching this schema:
                 [
                   {{
+                    "story_name": "Name of the feature or story (e.g. User Login)",
+                    "story": "Brief description of the story (e.g. As a user, I want to login...)",
                     "text": "Exact description of the validation check or rule.",
                     "type": "VALIDATION_RULE" // Must be one of: BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
                   }}
@@ -901,6 +920,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                         if rule_text and not rule_text.startswith("This script") and not "overview of the" in rule_text.lower() and len(rule_text) > 15:
                             all_extracted_rules.append({
                                 "code": f"BR-{str(rule_idx).zfill(3)}",
+                                "story_name": fr.get("story_name", ""),
+                                "story": fr.get("story", ""),
                                 "text": f"In {os.path.basename(filename)}: {rule_text}",
                                 "type": fr.get("type", "VALIDATION_RULE")
                             })
@@ -929,6 +950,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
             [
               {{
                 "code": "BR-001",
+                "story_name": "Name of the feature or story",
+                "story": "Brief description of the overall feature requirement",
                 "text": "Exact description of validation criteria and expected outcome.",
                 "type": "VALIDATION_RULE" // BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
               }}
@@ -949,11 +972,6 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
         ]
 
     async with AsyncSessionLocal() as db:
-        existing = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
-        for item in existing.scalars().all():
-            await db.delete(item)
-        await db.flush()
-
         state["parsed_requirements"] = []
         for r in rules_data:
             decomp = RequirementDecomposition(
@@ -961,6 +979,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 rule_code=r.get("code", "BR-UNK"),
                 rule_text=r.get("text", "Unknown business rule"),
                 rule_type=r.get("type", "BUSINESS_RULE"),
+                story_name=r.get("story_name", ""),
+                story=r.get("story", ""),
                 source_reference="Sprint_Story_Artifacts"
             )
             db.add(decomp)
@@ -1506,7 +1526,9 @@ async def coverage_reviewer_node(state: AgentWorkflowState) -> AgentWorkflowStat
                 rule_text=r.rule_text,
                 service_name=mapped_test_name.split("Test")[0],
                 test_name=mapped_test_name,
-                status=status
+                status=status,
+                story_name=r.story_name,
+                story=r.story
             )
             db.add(matrix_entry)
             await db.flush()

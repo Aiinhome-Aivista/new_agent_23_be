@@ -50,6 +50,35 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
     def add_divider():
         add_p("------------------------------------------------------------------------------------------------------------------------------------", is_italic=True)
 
+    def add_table(headers: List[str], rows: List[List[str]]):
+        tbl = ET.SubElement(body, f"{{{w_ns}}}tbl")
+        
+        tblPr = ET.SubElement(tbl, f"{{{w_ns}}}tblPr")
+        tblBorders = ET.SubElement(tblPr, f"{{{w_ns}}}tblBorders")
+        for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+            ET.SubElement(tblBorders, f"{{{w_ns}}}{border_name}", attrib={f"{{{w_ns}}}val": "single", f"{{{w_ns}}}sz": "4", f"{{{w_ns}}}space": "0", f"{{{w_ns}}}color": "auto"})
+
+        # Header Row
+        tr = ET.SubElement(tbl, f"{{{w_ns}}}tr")
+        for header in headers:
+            tc = ET.SubElement(tr, f"{{{w_ns}}}tc")
+            p = ET.SubElement(tc, f"{{{w_ns}}}p")
+            r = ET.SubElement(p, f"{{{w_ns}}}r")
+            rPr = ET.SubElement(r, f"{{{w_ns}}}rPr")
+            ET.SubElement(rPr, f"{{{w_ns}}}b")
+            t = ET.SubElement(r, f"{{{w_ns}}}t")
+            t.text = str(header)
+            
+        # Data Rows
+        for row in rows:
+            tr = ET.SubElement(tbl, f"{{{w_ns}}}tr")
+            for cell_data in row:
+                tc = ET.SubElement(tr, f"{{{w_ns}}}tc")
+                p = ET.SubElement(tc, f"{{{w_ns}}}p")
+                r = ET.SubElement(p, f"{{{w_ns}}}r")
+                t = ET.SubElement(r, f"{{{w_ns}}}t")
+                t.text = str(cell_data)
+
     ist_time_str = get_ist_string()
     target_classes = ", ".join([t.get("service") for t in tests]) if tests else "Proposed Test Suites"
 
@@ -68,83 +97,34 @@ def generate_word_report_docx(session_id: str, tech_profile: Dict[str, Any], mat
     add_p("")
 
     # =========================================================================
-    # TABLE OF CONTENTS
+    # SECTION 1: STORY DETAILS & TEST CASES
     # =========================================================================
-    add_p("TABLE OF CONTENTS", is_heading=True, level=2)
-    add_p("1. Executive Summary")
-    add_p("2. Technical Environment & Framework Configuration")
-    add_p("3. Requirements Traceability Matrix (RTM)")
-    add_p("4. Granular Test Case Specifications (Arrange / Act / Assert)")
-    add_p("5. Generated Unit Test Code Suites")
-    add_p("6. Execution Instructions & Guidance")
-    add_p("7. Governance, Security Guardrails & Audit Trail")
-    add_p("8. Automated Review Agent Audit Report")
-    add_p("")
-
-    # =========================================================================
-    # SECTION 1: EXECUTIVE SUMMARY
-    # =========================================================================
-    add_p("1. Executive Summary", is_heading=True, level=2)
-    add_p("This document presents the automated, requirement-driven unit test suite generated directly from business requirement documents (BRDs), API contracts, and database schema artifacts.")
-    add_p(f"Execution run completed at {ist_time_str}. By validating acceptance criteria, error conditions, and boundary constraints prior to or alongside code completion, the system guarantees 100% requirement alignment without relying on code-only assumptions.")
-    add_p("")
-
-    # =========================================================================
-    # SECTION 2: TECHNICAL ENVIRONMENT CONFIGURATION
-    # =========================================================================
-    add_p("2. Technical Environment & Framework Configuration", is_heading=True, level=2)
-    add_p(f"• Target Language: {tech_profile.get('language', 'Java')}", is_bold=True)
-    add_p(f"• Test Framework: {tech_profile.get('framework', 'JUnit 5')}", is_bold=True)
-    add_p(f"• Mocking Library: {tech_profile.get('mockLibrary', 'Mockito')}", is_bold=True)
-    add_p("• Test Pattern – AAA: Arrange-Act-Assert Pattern", is_bold=True)
-    add_p(f"• Target Test Class: {target_classes}", is_bold=True)
-    add_p("")
-
-    # =========================================================================
-    # SECTION 3: REQUIREMENTS TRACEABILITY MATRIX (RTM)
-    # =========================================================================
-    add_p("3. Requirements Traceability Matrix (RTM)", is_heading=True, level=2)
-    add_p("The matrix below maps each business rule to its target test class, traceability status, confidence score, and reviewer decision:")
+    add_p("1. Story Details & Test Cases", is_heading=True, level=2)
+    add_p("The following tables map each story to its respective test case specifications.")
     add_p("")
 
     if matrix:
+        grouped_data = {}
         for item in matrix:
-            rule = item.get("rule_code") or "REQ"
-            text = item.get("rule_text") or "Requirement Scenario"
-            target = item.get("test_name") or item.get("service_name") or "UnitTest"
-            status_val = item.get("status") or "COVERED"
-            add_p(f"Rule Code: [{rule}]", is_bold=True)
-            add_p(f"  • Rule Description: {text}")
-            add_p(f"  • Target Test Class: {target}")
-            add_p(f"  • Traceability Status: {status_val}")
-            add_p(f"  • Confidence: 99.2% (High Confidence)")
-            add_p(f"  • Reviewer Decision: APPROVED")
-            add_p("")
-    else:
-        add_p("No Requirement Traceability Matrix items parsed.")
-        add_p("")
+            story_id = item.get("story_id") or "UNKNOWN_STORY_ID"
+            if story_id not in grouped_data:
+                grouped_data[story_id] = []
+            grouped_data[story_id].append(item)
 
-    # =========================================================================
-    # SECTION 4: GRANULAR TEST CASE SPECIFICATIONS
-    # =========================================================================
-    add_p("4. Granular Test Case Specifications", is_heading=True, level=2)
-    add_p("Below is the detailed breakdown of Arrange / Act / Assert, Expected Exceptions, and Verification / Mock Checks:")
-    add_p("")
-
-    if matrix:
-        for idx, item in enumerate(matrix):
-            rule_code = item.get("rule_code") or "REQ"
-            rule_text = item.get("rule_text") or "Requirement Scenario"
-            test_file = item.get("test_name") or "TestClass"
-            
-            add_p(f"Generated Test Method: [UT-{str(idx+1).zfill(3)}] test_{rule_code.lower().replace('-', '_')}", is_bold=True)
-            add_p(f"  • Target Test Class: {test_file}")
-            add_p(f"  • Arrange: Set up mock requirements and dependencies mapped to {rule_code}.")
-            add_p(f"  • Act: Invoke the target component method implementing logic for: {rule_text}.")
-            add_p(f"  • Assert: Verify successful behavior, correct return values, or correct exceptions thrown.")
-            add_p(f"  • Expected Exception: Logic Dependent")
-            add_p(f"  • Verification / Mock Checks: Verify calls to mocked collaborators.")
-            add_p(f"  • Traceability Status: {item.get('status', 'COVERED')} | Confidence: 99.5% | Reviewer Decision: APPROVED")
+        for story_id, items in grouped_data.items():
+            add_p(f"Story ID: {story_id}", is_bold=True)
+            headers = ["Story ID", "Story Name", "Story", "Script Function Name", "Test Case Function Name", "Why We Create Test Case"]
+            rows = []
+            for item in items:
+                rows.append([
+                    str(item.get("story_id", "")),
+                    str(item.get("story_name", "")),
+                    str(item.get("story_details", item.get("story", ""))),
+                    str(item.get("script_function_name", item.get("service_name", ""))),
+                    str(item.get("test_case_function_name", item.get("test_name", ""))),
+                    str(item.get("test_case_reason", item.get("rule_text", "")))
+                ])
+            add_table(headers, rows)
             add_p("")
     else:
         add_p("No test case specifications generated.")
