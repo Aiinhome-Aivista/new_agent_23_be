@@ -38,6 +38,21 @@ def startup_event():
                 if "story" not in existing_cols:
                     conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN story TEXT"))
                     print("Migration: Added story to requirement_decompositions")
+                if "has_code_mapping" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN has_code_mapping BOOLEAN DEFAULT 1"))
+                    print("Migration: Added has_code_mapping to requirement_decompositions")
+                if "missing_reason" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN missing_reason TEXT"))
+                    print("Migration: Added missing_reason to requirement_decompositions")
+                if "ai_validation_score" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN ai_validation_score INTEGER"))
+                    print("Migration: Added ai_validation_score to requirement_decompositions")
+                if "ai_feedback" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN ai_feedback TEXT"))
+                    print("Migration: Added ai_feedback to requirement_decompositions")
+                if "alignment_status" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN alignment_status VARCHAR(50)"))
+                    print("Migration: Added alignment_status to requirement_decompositions")
             except Exception as e:
                 print(f"Migration warning (requirement_decompositions): {e}")
 

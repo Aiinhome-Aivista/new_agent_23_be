@@ -45,29 +45,48 @@ def extract_json_list(text: str) -> list:
 
 def extract_rules_from_text(text: str) -> list:
     """
-    Parses conversational text lists of rules (e.g., BR-001: explanation)
-    and extracts them into JSON objects.
+    Parses conversational text lists of rules (e.g., BR-001, VR-001, SR-001, AR-001)
+    and extracts them into JSON objects with proper prefixes.
     """
     rules = []
-    pattern = re.compile(r'(?:BR|Rule)[-_\s]?(\d+)\s*[:\-]\s*(.*)', re.IGNORECASE)
+    pattern = re.compile(r'(?:(BR|VR|SR|AR|IR|PR)|Rule)[-_\s]?(\d+)\s*[:\-]\s*(.*)', re.IGNORECASE)
     seen_codes = set()
     for line in text.splitlines():
         line_strip = line.strip()
         match = pattern.search(line_strip)
         if match:
-            num = match.group(1)
-            desc = match.group(2).strip()
-            code = f"BR-{num.zfill(3)}"
-            if code not in seen_codes:
-                seen_codes.add(code)
-                rule_type = "BUSINESS_RULE"
-                lower_desc = desc.lower()
+            raw_prefix = match.group(1)
+            num = match.group(2)
+            desc = match.group(3).strip()
+            
+            rule_type = "BUSINESS_RULE"
+            lower_desc = desc.lower()
+            if raw_prefix:
+                p_upper = raw_prefix.upper()
+                if p_upper == "VR":
+                    rule_type = "VALIDATION_RULE"
+                elif p_upper == "SR":
+                    rule_type = "SECURITY_RULE"
+                elif p_upper == "AR":
+                    rule_type = "AUTHORIZATION_RULE"
+                elif p_upper == "IR":
+                    rule_type = "INTEGRATION_RULE"
+                elif p_upper == "PR":
+                    rule_type = "PERFORMANCE_RULE"
+                elif p_upper == "BR":
+                    rule_type = "BUSINESS_RULE"
+            else:
                 if "validate" in lower_desc or "validation" in lower_desc or "format" in lower_desc or "email" in lower_desc:
                     rule_type = "VALIDATION_RULE"
                 elif "auth" in lower_desc or "security" in lower_desc or "password" in lower_desc or "token" in lower_desc or "lock" in lower_desc or "hash" in lower_desc:
                     rule_type = "SECURITY_RULE"
                 elif "role" in lower_desc or "admin" in lower_desc or "permission" in lower_desc or "access" in lower_desc or "rbac" in lower_desc or "authorize" in lower_desc:
                     rule_type = "AUTHORIZATION_RULE"
+                    
+            prefix = "VR" if rule_type == "VALIDATION_RULE" else "SR" if rule_type == "SECURITY_RULE" else "AR" if rule_type == "AUTHORIZATION_RULE" else "BR"
+            code = f"{prefix}-{num.zfill(3)}"
+            if code not in seen_codes:
+                seen_codes.add(code)
                 rules.append({
                     "code": code,
                     "text": desc,
@@ -183,6 +202,63 @@ def extract_json_dict(text: str) -> dict:
         pass
         
     return {}
+            
+def detect_codebase_language(code_context: str) -> dict:
+    """
+    Analyzes the scanned code files to detect the dominant programming language
+    and map appropriate test frameworks and mocking libraries.
+    """
+    if not code_context:
+        return {"detected_language": None, "extensions": {}}
+        
+    ext_counts = {}
+    for line in code_context.splitlines():
+        if line.startswith("=== File: "):
+            fname = line.replace("=== File: ", "").split(" ===")[0].strip()
+            ext = os.path.splitext(fname)[1].lower()
+            if ext:
+                ext_counts[ext] = ext_counts.get(ext, 0) + 1
+                
+    lang_weights = {
+        "Python": ext_counts.get(".py", 0) * 10,
+        "Java": ext_counts.get(".java", 0) * 10,
+        "TypeScript": (ext_counts.get(".ts", 0) + ext_counts.get(".tsx", 0)) * 10,
+        "JavaScript": (ext_counts.get(".js", 0) + ext_counts.get(".jsx", 0)) * 10,
+        "C#": ext_counts.get(".cs", 0) * 10,
+        "Go": ext_counts.get(".go", 0) * 10,
+    }
+    
+    # Fallback to syntax heuristics if file extensions were not captured in headers
+    if not any(lang_weights.values()):
+        if re.search(r'\bdef\s+[a-zA-Z0-9_]+\s*\(.*?\):', code_context) or ("import " in code_context and "self." in code_context):
+            lang_weights["Python"] = 5
+        if re.search(r'\bpublic\s+(?:class|interface|enum)\b', code_context) or "@Override" in code_context or "package " in code_context:
+            lang_weights["Java"] = 5
+        if "interface " in code_context or "export const " in code_context or ": string" in code_context or ": number" in code_context:
+            lang_weights["TypeScript"] = 5
+        if "namespace " in code_context or "using System;" in code_context:
+            lang_weights["C#"] = 5
+            
+    filtered = {k: v for k, v in lang_weights.items() if v > 0}
+    if not filtered:
+        return {"detected_language": None, "extensions": ext_counts}
+        
+    dominant = max(filtered, key=filtered.get)
+    defaults = {
+        "Python": {"framework": "Pytest", "mockLibrary": "pytest-mock"},
+        "Java": {"framework": "JUnit 5", "mockLibrary": "Mockito"},
+        "TypeScript": {"framework": "Jest", "mockLibrary": "Jest Mock"},
+        "JavaScript": {"framework": "Jest", "mockLibrary": "Sinon"},
+        "C#": {"framework": "xUnit", "mockLibrary": "Moq"},
+        "Go": {"framework": "testing", "mockLibrary": "testify"}
+    }
+    
+    return {
+        "detected_language": dominant,
+        "recommended_framework": defaults.get(dominant, {}).get("framework", "Unit Test"),
+        "recommended_mock_library": defaults.get(dominant, {}).get("mockLibrary", "Mock Library"),
+        "extensions": ext_counts
+    }
 
 
 SAMPLE_USER_SERVICE_TEST = """package com.example.service;
@@ -740,12 +816,23 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                     "req_id": decomp.req_id,
                     "rule_code": decomp.rule_code,
                     "rule_text": decomp.rule_text,
-                    "rule_type": decomp.rule_type
+                    "rule_type": decomp.rule_type,
+                    "story_name": decomp.story_name,
+                    "story": decomp.story,
+                    "has_code_mapping": getattr(decomp, 'has_code_mapping', True),
+                    "missing_reason": getattr(decomp, 'missing_reason', None)
                 })
             state["current_node"] = "decomposition"
             return state
 
     await broadcast_log(session_id, "[Requirement Decomposition] Decomposing requirements into granular business rules and validation cases...")
+
+    if not state.get("tech_profile"):
+        async with AsyncSessionLocal() as db:
+            sess_res = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+            sess_obj = sess_res.scalar_one_or_none()
+            if sess_obj and sess_obj.tech_profile:
+                state["tech_profile"] = dict(sess_obj.tech_profile)
 
     tech_profile = state.get("tech_profile") or {}
     git_url = tech_profile.get("git_url")
@@ -771,7 +858,6 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                     state["is_incremental"] = True
                     await broadcast_log(session_id, f"[Git Integration] Incremental mode detected! {len(modified_files)} file(s) modified since last processed commit: {last_processed_commit[:7]}")
                     
-                    # Read only the modified / added files
                     allowed_extensions = {
                         '.java', '.py', '.ts', '.tsx', '.cs', '.js', '.go', '.cpp', '.h', '.rb', '.php', '.swift', '.kt', '.m'
                     }
@@ -824,6 +910,39 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
         except Exception as e:
             await broadcast_log(session_id, f"[Git Integration Warning] Failed to fetch git codebase: {str(e)}")
 
+    # Detect codebase language & audit against selected Target Language
+    detected_lang_info = detect_codebase_language(code_context)
+    detected_lang = detected_lang_info.get("detected_language")
+    selected_lang = tech_profile.get("language", "Java")
+    
+    language_mismatch = {
+        "is_mismatch": False,
+        "selected_language": selected_lang,
+        "selected_framework": tech_profile.get("framework", "JUnit 5"),
+        "selected_mock_library": tech_profile.get("mockLibrary", "Mockito"),
+        "detected_language": detected_lang,
+        "recommended_framework": detected_lang_info.get("recommended_framework", "Pytest"),
+        "recommended_mock_library": detected_lang_info.get("recommended_mock_library", "pytest-mock"),
+        "detected_extensions": list(detected_lang_info.get("extensions", {}).keys())
+    }
+    
+    if detected_lang and detected_lang.lower() != selected_lang.lower():
+        language_mismatch["is_mismatch"] = True
+        language_mismatch["message"] = f"Target Language is set to {selected_lang} ({tech_profile.get('framework', '')}), but your repository contains {detected_lang} source code."
+        await broadcast_log(session_id, f"[Technology Stack Audit] WARNING: Selected Target Language is {selected_lang}, but repository codebase is written in {detected_lang}. Language mismatch popup triggered.")
+    
+    state["language_mismatch"] = language_mismatch
+    
+    # Persist language mismatch in session tech_profile for frontend access
+    async with AsyncSessionLocal() as db:
+        s_res = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+        s_obj = s_res.scalar_one_or_none()
+        if s_obj:
+            p = dict(s_obj.tech_profile) if s_obj.tech_profile else {}
+            p["language_mismatch"] = language_mismatch
+            s_obj.tech_profile = p
+            await db.commit()
+
     # Fetch uploaded artifacts (the sprint/story file)
     artifact_texts = []
     for art in state.get("artifacts", []):
@@ -837,139 +956,116 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
     try:
         llm = get_llm()
         
-        # Split code context by file boundary
-        parts = code_context.split("=== File: ") if code_context else []
-        all_extracted_rules = []
-        rule_idx = 1
-        
-        target_files = []
-        for part in parts:
-            if not part.strip():
-                continue
-            lines = part.splitlines()
-            first_line = lines[0].strip()
-            filename = first_line.split(" ===")[0].strip()
-            content = "\n".join(lines[1:])
-            
-            # Target logic files (views, controllers, services, routes, handlers, urls, and app/main entry points)
-            name_lower = filename.lower()
-            is_logic_file = (
-                "controller" in name_lower or
-                "agent" in name_lower or
-                "view" in name_lower or
-                "service" in name_lower or
-                "route" in name_lower or
-                "handler" in name_lower or
-                "url" in name_lower or
-                filename in ["app.py", "main.py", "server.js", "app.js", "main.go", "app.ts", "server.ts"]
-            )
-            # NEVER extract rules directly from migrations, schemas, settings, or tests
-            if any(k in name_lower for k in ["migration", "schema", "setting", "test", "spec"]):
-                is_logic_file = False
-                
-            if is_logic_file:
-                target_files.append((filename, content))
-                
-        # Run targeted rule extraction for each file
-        if target_files:
-            for filename, content in target_files:
-                await broadcast_log(session_id, f"[Requirement Decomposition] Extracting rules from {filename}...")
-                prompt = f"""
-                You are an elite QA Automation Architect.
-                Analyze the following code file `{filename}` in the context of the provided Sprint/Story requirements.
-                Extract ONLY the testable business rules, validation bounds, access controls, and error paths defined in it that are relevant to or affected by the requirements.
+        # 1. Extract comprehensive business rules directly from the uploaded Sprint/Story artifacts
+        await broadcast_log(session_id, "[Requirement Decomposition] Parsing uploaded story artifacts for requirement rules...")
+        story_prompt = f"""
+        You are an elite QA Automation Architect.
+        Analyze the uploaded sprint / story / BRD / specification artifacts and extract all testable business rules, validation criteria, security policies, and authorization rules.
 
-                --- SPRINT/STORY REQUIREMENTS ---
-                {combined_artifacts}
+        --- SPRINT / STORY REQUIREMENTS ---
+        {combined_artifacts}
 
-                --- RULES TO FOLLOW ---
-                - ONLY extract rules for functions, methods, variables, or endpoints that are EXPLICITLY implemented in the provided --- FILE CONTENT ---.
-                - DO NOT invent, hallucinate, or assume any functions, names, endpoints, or rules that are not present in the code.
-                - If Sprint/Story requirements are provided, only extract rules from this file that are directly relevant to, affected by, or mentioned in those requirements.
-                - DO NOT return general file summaries, overview text, or introductory explanations.
-                - Extract ACTUAL, testable validations and logic gates (e.g. checking parameter ranges, type validations, empty conditions).
-                - Limit rules STRICTLY to the code logic present in this specific file.
-                
-                --- FORMATTING GUIDELINE EXAMPLES (DO NOT COPY OR REFERENCE THESE DUMMY NAMES/CONCEPTS) ---
-                - "Validate that dummy_function_name rejects input if parameter_name is empty."
-                - "Ensure dummy_calculation raises an error if inputs are negative."
-
-                --- FILE CONTENT ---
-                {content}
-
-                --- RESPONSE FORMAT ---
-                Format your response EXACTLY as a JSON list matching this schema:
-                [
-                  {{
-                    "story_name": "Name of the feature or story (e.g. User Login)",
-                    "story": "Brief description of the story (e.g. As a user, I want to login...)",
-                    "text": "Exact description of the validation check or rule.",
-                    "type": "VALIDATION_RULE" // Must be one of: BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
-                  }}
-                ]
-                """
-                try:
-                    response = await llm.ainvoke([HumanMessage(content=prompt)])
-                    file_rules = extract_json_list(response.content)
-                    if not file_rules:
-                        file_rules = extract_rules_from_text(response.content)
-                        
-                    for fr in file_rules:
-                        rule_text = fr.get("text", "").strip()
-                        # Clean and filter generic sentences
-                        if rule_text and not rule_text.startswith("This script") and not "overview of the" in rule_text.lower() and len(rule_text) > 15:
-                            all_extracted_rules.append({
-                                "code": f"BR-{str(rule_idx).zfill(3)}",
-                                "story_name": fr.get("story_name", ""),
-                                "story": fr.get("story", ""),
-                                "text": f"In {os.path.basename(filename)}: {rule_text}",
-                                "type": fr.get("type", "VALIDATION_RULE")
-                            })
-                            rule_idx += 1
-                except Exception:
-                    continue
-            rules_data = all_extracted_rules
-
-        # Fallback to single prompt LLM call on combined_artifacts if no rules were extracted file-by-file
+        --- RESPONSE FORMAT ---
+        Format your response EXACTLY as a JSON list matching this schema:
+        [
+          {{
+            "code": "BR-001", // Use BR-001 for BUSINESS_RULE, VR-001 for VALIDATION_RULE, SR-001 for SECURITY_RULE, AR-001 for AUTHORIZATION_RULE
+            "story_name": "Name of the feature or story (e.g. User Registration)",
+            "story": "Brief description of the story (e.g. As a user, I want to register...)",
+            "text": "Exact description of validation criteria and expected outcome.",
+            "type": "BUSINESS_RULE" // BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
+          }}
+        ]
+        """
+        response = await llm.ainvoke([HumanMessage(content=story_prompt)])
+        rules_data = extract_json_list(response.content)
         if not rules_data:
-            await broadcast_log(session_id, "[Requirement Decomposition] Falling back to global rule extraction...")
-            prompt = f"""
-            You are an elite QA Automation Architect.
-            Your task is to analyze the sprint requirements to extract testable business rules, validation rules, security policies, and authorization constraints.
+            rules_data = extract_rules_from_text(response.content)
 
-            --- DEFINITIONS & GUIDELINES ---
-            - DO NOT extract generic descriptions or file introductions.
-            - Extract ACTUAL, testable business logic and validation criteria.
+        # 2. Check code mapping for each extracted rule against the codebase context
+        if rules_data and code_context:
+            await broadcast_log(session_id, "[Requirement Decomposition] Checking codebase for matching functions and service implementations...")
+            
+            # Extract known function and class identifiers from the codebase for deterministic cross-check
+            code_lower = code_context.lower()
+            
+            # Also invoke LLM to cross-verify implementation presence
+            check_prompt = f"""
+            You are a Senior Software Architect and QA Auditor.
+            Evaluate whether each of the following story rules has matching source code, functions, or class implementations in the provided codebase context.
+            If a function, endpoint, or class implementing the rule is missing in the code, mark "has_code_mapping" as false and explain what function/code is missing.
 
-            --- INPUT CONTEXT ---
-            [Sprint/Story/Requirements]:
-            {combined_artifacts}
+            --- STORY RULES ---
+            {json.dumps([{"code": r.get("code"), "story_name": r.get("story_name"), "text": r.get("text")} for r in rules_data], indent=2)}
+
+            --- CODEBASE CONTEXT ---
+            {code_context[:9000]}
 
             --- RESPONSE FORMAT ---
-            Format your response EXACTLY as a JSON list matching this schema:
+            Format your response EXACTLY as a JSON list:
             [
               {{
                 "code": "BR-001",
-                "story_name": "Name of the feature or story",
-                "story": "Brief description of the overall feature requirement",
-                "text": "Exact description of validation criteria and expected outcome.",
-                "type": "VALIDATION_RULE" // BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
+                "has_code_mapping": true, // true if matching function/class exists in code, false if code/function is not found
+                "missing_reason": null // null if true, or e.g. "Function 'smsOtpVerification' not found in repository" if false
               }}
             ]
             """
-            response = await llm.ainvoke([HumanMessage(content=prompt)])
-            rules_data = extract_json_list(response.content)
-            if not rules_data:
-                rules_data = extract_rules_from_text(response.content)
+            try:
+                check_resp = await llm.ainvoke([HumanMessage(content=check_prompt)])
+                check_results = extract_json_list(check_resp.content)
+                check_map = {item.get("code"): item for item in check_results if isinstance(item, dict) and "code" in item}
+                
+                for r in rules_data:
+                    c_info = check_map.get(r.get("code"))
+                    if c_info:
+                        r["has_code_mapping"] = bool(c_info.get("has_code_mapping", True))
+                        r["missing_reason"] = c_info.get("missing_reason") if not r["has_code_mapping"] else None
+                    else:
+                        # Fallback heuristic: check if any keyword from rule exists in code
+                        r_text = (r.get("text", "") + " " + r.get("story_name", "")).lower()
+                        keywords = [w for w in re.findall(r'\b[a-z]{4,}\b', r_text) if w not in ['user', 'test', 'must', 'that', 'should', 'with', 'from', 'when', 'then']]
+                        matches = sum(1 for kw in keywords if kw in code_lower)
+                        if matches > 0:
+                            r["has_code_mapping"] = True
+                            r["missing_reason"] = None
+                        else:
+                            r["has_code_mapping"] = False
+                            r["missing_reason"] = f"No matching function or method found in codebase for {r.get('story_name', 'story')}"
+            except Exception as e:
+                await broadcast_log(session_id, f"[Requirement Decomposition Warning] Code mapping check failed: {str(e)}")
+                for r in rules_data:
+                    r["has_code_mapping"] = True
+                    r["missing_reason"] = None
+        elif rules_data and not code_context:
+            # No codebase connected or empty code context
+            for r in rules_data:
+                r["has_code_mapping"] = False
+                r["missing_reason"] = "No codebase repository was provided or repository contains no source code."
     except Exception as e:
         await broadcast_log(session_id, f"[Requirement Decomposition Warning] Extraction failed: {str(e)}")
 
-    # Absolute fallback
+    # Absolute fallback if empty
     if not rules_data:
         repo_name = git_url.split('/')[-1].replace('.git', '') if git_url else 'Project'
         rules_data = [
-            {"code": "BR-001", "text": f"Validate core business logic and workflows for {repo_name} components.", "type": "BUSINESS_RULE"}
+            {
+                "code": "BR-001",
+                "story_name": f"{repo_name} Feature",
+                "story": f"Validate core business logic for {repo_name}",
+                "text": f"Validate core business logic and workflows for {repo_name} components.",
+                "type": "BUSINESS_RULE",
+                "has_code_mapping": bool(code_context),
+                "missing_reason": None if code_context else "No codebase repository provided"
+            }
         ]
+
+    # Ensure all rules have has_code_mapping property
+    for idx, r in enumerate(rules_data, 1):
+        if "code" not in r or not r["code"]:
+            r["code"] = f"BR-{str(idx).zfill(3)}"
+        if "has_code_mapping" not in r:
+            r["has_code_mapping"] = True
 
     async with AsyncSessionLocal() as db:
         state["parsed_requirements"] = []
@@ -981,7 +1077,9 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 rule_type=r.get("type", "BUSINESS_RULE"),
                 story_name=r.get("story_name", ""),
                 story=r.get("story", ""),
-                source_reference="Sprint_Story_Artifacts"
+                source_reference="Sprint_Story_Artifacts",
+                has_code_mapping=r.get("has_code_mapping", True),
+                missing_reason=r.get("missing_reason")
             )
             db.add(decomp)
             await db.flush()
@@ -989,11 +1087,19 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 "req_id": decomp.req_id,
                 "rule_code": decomp.rule_code,
                 "rule_text": decomp.rule_text,
-                "rule_type": decomp.rule_type
+                "rule_type": decomp.rule_type,
+                "story_name": decomp.story_name,
+                "story": decomp.story,
+                "has_code_mapping": decomp.has_code_mapping,
+                "missing_reason": decomp.missing_reason
             })
         await db.commit()
 
-    await broadcast_log(session_id, f"[Requirement Decomposition] Extracted {len(rules_data)} core business rules & acceptance criteria.")
+    missing_count = sum(1 for r in rules_data if not r.get("has_code_mapping", True))
+    if missing_count > 0:
+        await broadcast_log(session_id, f"[Requirement Decomposition] Extracted {len(rules_data)} rules. Warning: {missing_count} rule(s) have no matching code/functions in repository.")
+    else:
+        await broadcast_log(session_id, f"[Requirement Decomposition] Extracted {len(rules_data)} core business rules & acceptance criteria. All mapped to codebase.")
     state["current_node"] = "decomposition"
     return state
 

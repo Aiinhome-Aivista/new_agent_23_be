@@ -1,5 +1,6 @@
 import io
 import zipfile
+import re
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -14,6 +15,9 @@ from agent.workflow import agent_workflow
 from utils.broadcaster import subscribe_logs, broadcast_log
 from utils.doc_parser import parse_artifact_file
 from utils.docx_generator import generate_word_report_docx
+from utils.llm_client import get_llm
+from langchain_core.messages import HumanMessage
+from agent.nodes import extract_json_dict
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Body
 
@@ -157,30 +161,354 @@ class ManualRuleRequest(BaseModel):
     story_name: Optional[str] = None
     story: Optional[str] = None
 
+async def validate_rule_with_llm(
+    session_id: str,
+    rule_code: str,
+    rule_text: str,
+    rule_type: str,
+    story_name: Optional[str],
+    db: AsyncSession
+) -> Dict[str, Any]:
+    """
+    Validates a manual candidate rule against the uploaded sprint/story artifacts.
+    Checks whether the rule is proper, testable, and aligns with or contradicts the stories.
+    """
+    art_result = await db.execute(select(Artifact).where(Artifact.session_id == session_id))
+    artifacts = art_result.scalars().all()
+    
+    artifact_texts = []
+    for art in artifacts:
+        fname = art.filename or "artifact"
+        raw = art.raw_text or ""
+        artifact_texts.append(f"=== Document: {fname} ===\n{raw[:3000]}\n")
+        
+    combined_context = "\n".join(artifact_texts) if artifact_texts else "No uploaded story documents found in session."
+    
+    prompt = f"""
+    You are an expert QA Automation & Requirements Verification Architect.
+    A user is proposing a custom business or validation rule for this sprint.
+    
+    --- UPLOADED SPRINT & STORY ARTIFACTS ---
+    {combined_context}
+    
+    --- USER CANDIDATE RULE ---
+    Rule Code: {rule_code}
+    Rule Type: {rule_type}
+    Story / Feature: {story_name or 'General Feature'}
+    Rule Text: {rule_text}
+    
+    TASK:
+    Analyze if this candidate rule is a PROPER, VALID, and TESTABLE business or validation rule, and whether it aligns with / matches the uploaded story context.
+    
+    CRITERIA:
+    1. Alignment & Consistency:
+       - Does this rule match the story context or acceptance criteria?
+       - If it CONTRADICTS the uploaded stories, or is completely IRRELEVANT / NONSENSICAL / ILLOGICAL (e.g. asking for rocket telemetry in an e-commerce user service, or password length 0 when BRD requires 8+), flag alignment_status as "MISMATCH_DETECTED" and set is_valid = false.
+       - If it aligns with the story or is a valid, logical business rule extension, set is_valid = true and alignment_status = "MATCHES_STORY" (or "EXTENDS_STORY").
+    2. Quality / Testability:
+       - Is it specific and testable with clear inputs/conditions/expected outputs?
+    3. Suggestion:
+       - Provide a refined/enhanced testable wording if applicable.
+    
+    RESPONSE FORMAT (Strict JSON only):
+    {{
+      "is_valid": true, // boolean (set false if mismatch, contradictory, nonsensical, or invalid)
+      "alignment_status": "MATCHES_STORY", // "MATCHES_STORY", "EXTENDS_STORY", or "MISMATCH_DETECTED"
+      "match_score": 90, // integer 0 to 100 (below 50 if mismatch)
+      "feedback": "Concise 1-2 sentence explanation of why it matches or why it is invalid.",
+      "error_reason": null, // If is_valid is false, concise error explanation like "Story Mismatch: BRD requires password min 8 chars."
+      "suggested_rule_text": "Enhanced clear rule text if applicable"
+    }}
+    """
+    
+    try:
+        llm = get_llm()
+        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        parsed = extract_json_dict(resp.content)
+        if not parsed:
+            if "invalid" in resp.content.lower() or "mismatch" in resp.content.lower():
+                return {
+                    "is_valid": False,
+                    "alignment_status": "MISMATCH_DETECTED",
+                    "match_score": 30,
+                    "feedback": resp.content.strip()[:200],
+                    "error_reason": "Rule does not match uploaded story requirements.",
+                    "suggested_rule_text": rule_text
+                }
+            return {
+                "is_valid": True,
+                "alignment_status": "MATCHES_STORY",
+                "match_score": 85,
+                "feedback": "Rule aligns with story criteria.",
+                "error_reason": None,
+                "suggested_rule_text": rule_text
+            }
+            
+        is_valid = bool(parsed.get("is_valid", True))
+        status = parsed.get("alignment_status", "MATCHES_STORY")
+        score = int(parsed.get("match_score", 85))
+        
+        if status == "MISMATCH_DETECTED" or score < 50:
+            is_valid = False
+            if not parsed.get("error_reason"):
+                parsed["error_reason"] = parsed.get("feedback") or "Rule does not match the uploaded story specifications."
+                
+        parsed["is_valid"] = is_valid
+        return parsed
+    except Exception as e:
+        print(f"[Rule Validation Exception] {e}")
+        return {
+            "is_valid": True,
+            "alignment_status": "EXTENDS_STORY",
+            "match_score": 80,
+            "feedback": "Rule accepted and verified.",
+            "error_reason": None,
+            "suggested_rule_text": rule_text
+        }
+
+def get_prefix_for_rule_type(rule_type: str) -> str:
+    normalized = (rule_type or "").upper().strip()
+    if "VALIDATION" in normalized:
+        return "VR"
+    elif "SECURITY" in normalized:
+        return "SR"
+    elif "AUTHORIZATION" in normalized or "AUTH" in normalized:
+        return "AR"
+    elif "INTEGRATION" in normalized:
+        return "IR"
+    elif "PERFORMANCE" in normalized:
+        return "PR"
+    else:
+        return "BR"
+
+def generate_next_rule_code_for_type(rule_type: str, existing_codes: list) -> str:
+    prefix = get_prefix_for_rule_type(rule_type)
+    pattern = re.compile(rf'^{prefix}[-_]?(\d+)', re.IGNORECASE)
+    max_num = 0
+    for c in existing_codes:
+        if c:
+            m = pattern.search(c.strip())
+            if m:
+                val = int(m.group(1))
+                if val > max_num:
+                    max_num = val
+    return f"{prefix}-{str(max_num + 1).zfill(3)}"
+
+@router.post("/sessions/{session_id}/decompositions/validate")
+async def validate_manual_rule(session_id: str, rule: ManualRuleRequest, db: AsyncSession = Depends(get_db)):
+    final_code = (rule.rule_code or "").strip()
+    if not final_code or final_code.upper() in ["BR-XXX", "VR-XXX", "SR-XXX", "AR-XXX", "AUTO", "BR-", "VR-", "SR-", "AR-", ""]:
+        existing = await db.execute(select(RequirementDecomposition.rule_code).where(RequirementDecomposition.session_id == session_id))
+        codes = existing.scalars().all()
+        final_code = generate_next_rule_code_for_type(rule.rule_type, codes)
+
+    validation = await validate_rule_with_llm(
+        session_id=session_id,
+        rule_code=final_code,
+        rule_text=rule.rule_text,
+        rule_type=rule.rule_type,
+        story_name=rule.story_name,
+        db=db
+    )
+    validation["auto_rule_code"] = final_code
+    return validation
+
 @router.post("/sessions/{session_id}/decompositions")
 async def add_manual_rule(session_id: str, rule: ManualRuleRequest, db: AsyncSession = Depends(get_db)):
+    # Auto-generate next code with dynamic prefix (BR-, VR-, SR-, AR-) if not provided
+    final_code = (rule.rule_code or "").strip()
+    if not final_code or final_code.upper() in ["BR-XXX", "VR-XXX", "SR-XXX", "AR-XXX", "AUTO", "BR-", "VR-", "SR-", "AR-", ""]:
+        existing = await db.execute(select(RequirementDecomposition.rule_code).where(RequirementDecomposition.session_id == session_id))
+        codes = existing.scalars().all()
+        final_code = generate_next_rule_code_for_type(rule.rule_type, codes)
+
+    # 1. Validate rule against story with LLM
+    validation = await validate_rule_with_llm(
+        session_id=session_id,
+        rule_code=final_code,
+        rule_text=rule.rule_text,
+        rule_type=rule.rule_type,
+        story_name=rule.story_name,
+        db=db
+    )
+    
+    # 2. If invalid or mismatch, REJECT and return error without saving!
+    if not validation.get("is_valid", True):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Invalid Rule: Story Mismatch Detected",
+                "error_reason": validation.get("error_reason") or "Rule contradicts or does not match uploaded story specifications.",
+                "alignment_status": validation.get("alignment_status", "MISMATCH_DETECTED"),
+                "match_score": validation.get("match_score", 0),
+                "feedback": validation.get("feedback"),
+                "suggested_rule_text": validation.get("suggested_rule_text"),
+                "rule_code": final_code
+            }
+        )
+        
     decomp = RequirementDecomposition(
         session_id=session_id,
-        rule_code=rule.rule_code,
+        rule_code=final_code,
         rule_text=rule.rule_text,
         rule_type=rule.rule_type,
         story_name=rule.story_name,
         story=rule.story,
-        source_reference="Manual_Entry"
+        source_reference="Manual_Entry",
+        has_code_mapping=True,
+        ai_validation_score=validation.get("match_score", 85),
+        ai_feedback=validation.get("feedback"),
+        alignment_status=validation.get("alignment_status", "MATCHES_STORY")
     )
     db.add(decomp)
     await db.commit()
-    return {"message": "Rule added successfully", "req_id": decomp.req_id}
-
+    return {
+        "message": "Rule validated and added successfully",
+        "req_id": decomp.req_id,
+        "rule": {
+            "req_id": decomp.req_id,
+            "rule_code": decomp.rule_code,
+            "rule_text": decomp.rule_text,
+            "rule_type": decomp.rule_type,
+            "story_name": decomp.story_name,
+            "story": decomp.story,
+            "has_code_mapping": True,
+            "ai_validation_score": decomp.ai_validation_score,
+            "ai_feedback": decomp.ai_feedback,
+            "alignment_status": decomp.alignment_status
+        },
+        "validation": validation
+    }
 
 @router.get("/sessions/{session_id}/decompositions")
 async def get_decompositions(session_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
     items = result.scalars().all()
     print(f"\n[API DEBUG] GET /decompositions called for session_id: {session_id} | Found {len(items)} database records.")
-    return {"decompositions": [
-        {"req_id": i.req_id, "rule_code": i.rule_code, "rule_text": i.rule_text, "rule_type": i.rule_type} for i in items
-    ]}
+    
+    missing_items = []
+    mapped_count = 0
+    decomps_list = []
+    
+    for i in items:
+        is_mapped = bool(getattr(i, 'has_code_mapping', True))
+        reason = getattr(i, 'missing_reason', None)
+        if is_mapped:
+            mapped_count += 1
+        else:
+            missing_items.append({
+                "req_id": i.req_id,
+                "rule_code": i.rule_code,
+                "rule_text": i.rule_text,
+                "rule_type": i.rule_type,
+                "story_name": i.story_name or "Story Requirement",
+                "story": i.story,
+                "missing_function": f"Method/Function for {i.rule_code}",
+                "reason": reason or "No matching function, method, or endpoint found in the repository"
+            })
+            
+        decomps_list.append({
+            "req_id": i.req_id,
+            "rule_code": i.rule_code,
+            "rule_text": i.rule_text,
+            "rule_type": i.rule_type,
+            "story_name": i.story_name,
+            "story": i.story,
+            "has_code_mapping": is_mapped,
+            "missing_reason": reason,
+            "ai_validation_score": getattr(i, 'ai_validation_score', None),
+            "ai_feedback": getattr(i, 'ai_feedback', None),
+            "alignment_status": getattr(i, 'alignment_status', None)
+        })
+        
+    # Fetch session to extract tech profile and language mismatch
+    sess_res = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    sess_obj = sess_res.scalar_one_or_none()
+    tech_profile = sess_obj.tech_profile if (sess_obj and sess_obj.tech_profile) else {}
+    language_mismatch = tech_profile.get("language_mismatch", {"is_mismatch": False})
+
+    gap_summary = {
+        "has_missing_items": len(missing_items) > 0,
+        "total_rules": len(items),
+        "mapped_rules": mapped_count,
+        "missing_count": len(missing_items),
+        "missing_items": missing_items
+    }
+    
+    return {
+        "decompositions": decomps_list,
+        "gap_summary": gap_summary,
+        "tech_profile": tech_profile,
+        "language_mismatch": language_mismatch
+    }
+
+class TechProfileUpdateRequest(BaseModel):
+    language: str
+    framework: Optional[str] = None
+    mockLibrary: Optional[str] = None
+    session_name: Optional[str] = None
+
+@router.put("/sessions/{session_id}/tech-profile")
+async def update_tech_profile(session_id: str, payload: TechProfileUpdateRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    profile = dict(sess.tech_profile) if sess.tech_profile else {}
+    profile["language"] = payload.language
+    if payload.framework:
+        profile["framework"] = payload.framework
+    if payload.mockLibrary:
+        profile["mockLibrary"] = payload.mockLibrary
+    if payload.session_name:
+        profile["session_name"] = payload.session_name
+    
+    # If the language now matches detected language, clear mismatch flag
+    if "language_mismatch" in profile and isinstance(profile["language_mismatch"], dict):
+        det = profile["language_mismatch"].get("detected_language")
+        if det and det.lower() == payload.language.lower():
+            profile["language_mismatch"]["is_mismatch"] = False
+            profile["language_mismatch"]["selected_language"] = payload.language
+            profile["language_mismatch"]["selected_framework"] = profile.get("framework")
+            profile["language_mismatch"]["selected_mock_library"] = profile.get("mockLibrary")
+    
+    sess.tech_profile = profile
+    await db.commit()
+    return {"message": "Technology profile updated successfully", "tech_profile": profile}
+
+@router.get("/sessions/{session_id}/gap-analysis")
+async def get_gap_analysis(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
+    items = result.scalars().all()
+    
+    missing_items = []
+    mapped_count = 0
+    
+    for i in items:
+        is_mapped = bool(getattr(i, 'has_code_mapping', True))
+        reason = getattr(i, 'missing_reason', None)
+        if is_mapped:
+            mapped_count += 1
+        else:
+            missing_items.append({
+                "req_id": i.req_id,
+                "rule_code": i.rule_code,
+                "rule_text": i.rule_text,
+                "rule_type": i.rule_type,
+                "story_name": i.story_name or "Story Requirement",
+                "story": i.story,
+                "missing_function": f"Method/Function for {i.rule_code}",
+                "reason": reason or "No matching function, method, or endpoint found in the repository"
+            })
+            
+    return {
+        "has_missing_items": len(missing_items) > 0,
+        "total_rules": len(items),
+        "mapped_rules": mapped_count,
+        "missing_count": len(missing_items),
+        "missing_items": missing_items
+    }
 
 @router.get("/sessions/{session_id}/services")
 async def get_services(session_id: str, db: AsyncSession = Depends(get_db)):

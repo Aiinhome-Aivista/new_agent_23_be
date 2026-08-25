@@ -1,7 +1,7 @@
 import uuid
 import json
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.types import TypeDecorator, TEXT
 from sqlalchemy.orm import relationship
 from database.database import Base
@@ -73,6 +73,11 @@ class RequirementDecomposition(Base):
     source_reference = Column(String(255))
     story_name = Column(String(255), nullable=True)
     story = Column(Text, nullable=True)
+    has_code_mapping = Column(Boolean, default=True)
+    missing_reason = Column(Text, nullable=True)
+    ai_validation_score = Column(Integer, nullable=True)
+    ai_feedback = Column(Text, nullable=True)
+    alignment_status = Column(String(50), nullable=True)
 
     session = relationship("GenerationSession", back_populates="decompositions")
 
