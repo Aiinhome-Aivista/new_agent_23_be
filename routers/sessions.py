@@ -177,6 +177,7 @@ async def add_manual_rule(session_id: str, rule: ManualRuleRequest, db: AsyncSes
 async def get_decompositions(session_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(RequirementDecomposition).where(RequirementDecomposition.session_id == session_id))
     items = result.scalars().all()
+    print(f"\n[API DEBUG] GET /decompositions called for session_id: {session_id} | Found {len(items)} database records.")
     return {"decompositions": [
         {"req_id": i.req_id, "rule_code": i.rule_code, "rule_text": i.rule_text, "rule_type": i.rule_type} for i in items
     ]}
@@ -185,6 +186,7 @@ async def get_decompositions(session_id: str, db: AsyncSession = Depends(get_db)
 async def get_services(session_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(ServiceContract).where(ServiceContract.session_id == session_id))
     items = result.scalars().all()
+    print(f"[API DEBUG] GET /services called for session_id: {session_id} | Found {len(items)} database records.\n")
     return {"services": [
         {"service_id": i.service_id, "name": i.name, "methods": i.methods, "dependencies": i.dependencies, "status": i.status} for i in items
     ]}
