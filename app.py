@@ -4,7 +4,7 @@ from database.config import settings
 from database.database import engine, Base
 from routers import sessions, auth, jira
 app = FastAPI(
-    title="Unit-Test Case Generator Agent Backend..",
+    title="Unit-Test Case Generator Agent Backend.....",
     version="1.0.0",
     debug=True
 )
