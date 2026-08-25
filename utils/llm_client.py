@@ -39,7 +39,7 @@ def get_llm():
             llm = ChatGoogleGenerativeAI(
                 model=settings.GEMINI_MODEL,
                 google_api_key=settings.GEMINI_API_KEY,
-                temperature=0.2
+                temperature=0.0
             )
         elif settings.MISTRAL_API_KEY:
             # Using ChatOpenAI as a generic client for Mistral Cloud since Mistral's API is OpenAI compatible
@@ -47,7 +47,7 @@ def get_llm():
                 model=settings.MODEL_NAME,
                 api_key=settings.MISTRAL_API_KEY,
                 base_url="https://api.mistral.ai/v1",
-                temperature=0.2
+                temperature=0.0
             )
         else:
             raise ValueError("No valid LLM configuration found in .env (Check MODE, API_KEYs)")
@@ -60,7 +60,7 @@ def get_llm():
             model=settings.MISTRAL_LOCAL_MODEL,
             api_key="local",
             base_url=base_url,
-            temperature=0.2
+            temperature=0.0
         )
     return LoggingChatModelWrapper(llm)
 

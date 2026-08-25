@@ -9,7 +9,7 @@ from utils.llm_client import get_llm
 from utils.ast_validator import validate_syntax
 from utils.security import scan_for_secrets, redact_secrets, detect_prompt_injection
 from utils.doc_parser import parse_artifact_file
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from database.database import AsyncSessionLocal
 from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix, ReviewReport
 from sqlalchemy import select
@@ -20,22 +20,29 @@ def extract_json_list(text: str) -> list:
     Finds the first [...] JSON list in the text and parses it.
     """
     text_clean = text.strip()
+    
+    # Try searching for markdown json block first
     match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text_clean, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            # Replace invalid backslashes (like in paths) with forward slash
+            cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '/', match.group(1))
+            return json.loads(cleaned)
         except Exception:
             pass
-            
+
+    # Try matching brackets anywhere in the response
     match = re.search(r"(\[.*\])", text_clean, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '/', match.group(1))
+            return json.loads(cleaned)
         except Exception:
             pass
             
     try:
-        data = json.loads(text_clean)
+        cleaned = re.sub(r'\\(?!["\\/bfnrtu])', '/', text_clean)
+        data = json.loads(cleaned)
         if isinstance(data, list):
             return data
     except Exception:
@@ -134,7 +141,7 @@ def extract_services_from_text(text: str) -> list:
 def extract_services_from_code_context(code_context: str) -> list:
     """
     Parses the codebase context file-by-file to extract all classes and functions
-    as services and target methods without any capping limits.
+    as services and target methods, avoiding comments, strings and internal helper files.
     """
     if not code_context:
         return []
@@ -145,27 +152,48 @@ def extract_services_from_code_context(code_context: str) -> list:
         if not part.strip():
             continue
             
-        lines = part.splitlines()
-        first_line = lines[0].strip()
+        lines_list = part.splitlines()
+        first_line = lines_list[0].strip()
         filename = first_line.split(" ===")[0].strip()
-        content = "\n".join(lines[1:])
         
-        class_names = re.findall(r'class\s+([a-zA-Z0-9_]+)\b', content)
-        class_names = list(dict.fromkeys(class_names))
+        # Skip files that are not part of the active production codebase (like tests, graph nodes, migrations)
+        name_lower = filename.lower()
+        if any(k in name_lower for k in ["node", "workflow", "test", "spec", "migration", "schema", "database", "config"]):
+            continue
+            
+        content = "\n".join(lines_list[1:])
         
+        # Parse actual class names by looking at line starts
+        class_names = []
+        for line in content.splitlines():
+            line_strip = line.strip()
+            if line_strip.startswith("class ") or line_strip.startswith("export class "):
+                match = re.match(r'^(?:export\s+)?class\s+([a-zA-Z0-9_]+)', line_strip)
+                if match:
+                    class_names.append(match.group(1))
+                    
+        # Parse actual function names by looking at line starts
+        funcs = []
+        for line in content.splitlines():
+            line_strip = line.strip()
+            if line_strip.startswith("def ") or line_strip.startswith("async def "):
+                match = re.match(r'^(?:async\s+)?def\s+([a-zA-Z0-9_]+)', line_strip)
+                if match and not match.group(1).startswith("_"):
+                    funcs.append(match.group(1))
+            elif line_strip.startswith("export function ") or line_strip.startswith("function "):
+                match = re.match(r'^(?:export\s+)?function\s+([a-zA-Z0-9_]+)', line_strip)
+                if match and not match.group(1).startswith("_"):
+                    funcs.append(match.group(1))
+
         if class_names:
             for c in class_names:
-                methods = re.findall(r'def\s+([a-zA-Z0-9_]+)\b', content)
-                methods = [m for m in methods if not m.startswith("_")]
-                if methods:
+                if funcs:
                     services.append({
                         "name": c,
-                        "methods": list(set(methods)),
+                        "methods": list(set(funcs)),
                         "dependencies": ["DatabaseRepository"]
                     })
         else:
-            funcs = re.findall(r'def\s+([a-zA-Z0-9_]+)\b', content)
-            funcs = [f for f in funcs if not f.startswith("_")]
             if funcs:
                 services.append({
                     "name": os.path.basename(filename),
@@ -174,6 +202,65 @@ def extract_services_from_code_context(code_context: str) -> list:
                 })
                 
     return services
+
+def get_codebase_summary(code_context: str) -> str:
+    """
+    Extracts only a summary of the codebase structure (files, classes, methods)
+    to minimize prompt size and avoid LLM confusion.
+    """
+    if not code_context:
+        return ""
+        
+    summary_parts = []
+    parts = code_context.split("=== File: ")
+    for part in parts:
+        if not part.strip():
+            continue
+        lines_list = part.splitlines()
+        first_line = lines_list[0].strip()
+        filename = first_line.split(" ===")[0].strip()
+        
+        # Strictly ensure filename looks like a real relative file path with allowed extensions
+        name_lower = filename.lower()
+        if not any(name_lower.endswith(ext) for ext in ['.py', '.ts', '.tsx', '.java', '.cs', '.js', '.go']):
+            continue
+            
+        # Don't parse nodes, workflows, tests, configurations, or system templates to avoid self-referencing confusion
+        if any(k in name_lower for k in ["node", "workflow", "test", "spec", "migration", "schema", "database", "settings", "wsgi", "asgi", "manage.py"]):
+            continue
+            
+        content = "\n".join(lines_list[1:])
+        
+        file_classes = []
+        for line in content.splitlines():
+            line_strip = line.strip()
+            if line_strip.startswith("class ") or line_strip.startswith("export class "):
+                match = re.match(r'^(?:export\s+)?class\s+([a-zA-Z0-9_]+)', line_strip)
+                if match:
+                    file_classes.append(match.group(1))
+                    
+        file_funcs = []
+        for line in content.splitlines():
+            line_strip = line.strip()
+            if line_strip.startswith("def ") or line_strip.startswith("async def "):
+                match = re.match(r'^(?:async\s+)?def\s+([a-zA-Z0-9_]+)', line_strip)
+                if match and not match.group(1).startswith("_"):
+                    file_funcs.append(match.group(1))
+            elif line_strip.startswith("export function ") or line_strip.startswith("function "):
+                match = re.match(r'^(?:export\s+)?function\s+([a-zA-Z0-9_]+)', line_strip)
+                if match and not match.group(1).startswith("_"):
+                    file_funcs.append(match.group(1))
+                    
+        if file_classes or file_funcs:
+            summary = f"File: {filename}\n"
+            if file_classes:
+                summary += f"  Classes: {', '.join(file_classes)}\n"
+            if file_funcs:
+                summary += f"  Methods/Functions: {', '.join(list(dict.fromkeys(file_funcs)))}\n"
+            summary_parts.append(summary)
+            
+    return "\n".join(summary_parts)
+
 
 def extract_json_dict(text: str) -> dict:
     """
@@ -959,25 +1046,44 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
         # 1. Extract comprehensive business rules directly from the uploaded Sprint/Story artifacts
         await broadcast_log(session_id, "[Requirement Decomposition] Parsing uploaded story artifacts for requirement rules...")
         story_prompt = f"""
-        You are an elite QA Automation Architect.
-        Analyze the uploaded sprint / story / BRD / specification artifacts and extract all testable business rules, validation criteria, security policies, and authorization rules.
+        Analyze the uploaded sprint / story requirements and extract all testable rules.
+
+        --- CRITICAL INSTRUCTIONS ---
+        1. Extract a separate rule for EVERY single acceptance criterion, functional requirement, business logic step, validation constraint, security policy, and authorization rule mentioned in the text.
+        2. Do NOT summarize or group multiple criteria into a single rule. If the input requirements list 7 acceptance criteria, you MUST output at least 7 corresponding rules in the JSON list.
+        3. Assign rule codes sequentially per type, starting from 001. For example:
+           - Business Rules: BR-001, BR-002, BR-003, ...
+           - Validation Rules: VR-001, VR-002, VR-003, ...
+           - Security Rules: SR-001, SR-002, ...
+           - Authorization Rules: AR-001, AR-002, ...
+        4. Match the rule type correctly:
+           - BUSINESS_RULE (BR-): Core behaviors, flows, operations, feature objectives (e.g. "Test cases can be published to Jira", "Unit test cases generated automatically").
+           - VALIDATION_RULE (VR-): Form validations, input formats, error message displays, success/failure conditions (e.g. "Errors are displayed when generation or Jira integration fails", "Source code/artifact can be uploaded successfully").
+           - SECURITY_RULE (SR-): Encryption, secure transmission/storage, password guidelines.
+           - AUTHORIZATION_RULE (AR-): Role checks, permission verification, user-based access controls.
 
         --- SPRINT / STORY REQUIREMENTS ---
         {combined_artifacts}
 
         --- RESPONSE FORMAT ---
-        Format your response EXACTLY as a JSON list matching this schema:
+        You MUST respond ONLY with a raw, valid JSON list matching the schema below.
         [
           {{
-            "code": "BR-001", // Use BR-001 for BUSINESS_RULE, VR-001 for VALIDATION_RULE, SR-001 for SECURITY_RULE, AR-001 for AUTHORIZATION_RULE
-            "story_name": "Name of the feature or story (e.g. User Registration)",
-            "story": "Brief description of the story (e.g. As a user, I want to register...)",
-            "text": "Exact description of validation criteria and expected outcome.",
-            "type": "BUSINESS_RULE" // BUSINESS_RULE, VALIDATION_RULE, SECURITY_RULE, AUTHORIZATION_RULE
+            "code": "BR-001",
+            "story_name": "AI Unit Test Case Generator",
+            "story": "I want the AI Agent to analyze source code and automatically generate unit test cases...",
+            "text": "Exact description of validation criteria and expected outcome from the story.",
+            "type": "BUSINESS_RULE"
           }}
         ]
         """
-        response = await llm.ainvoke([HumanMessage(content=story_prompt)])
+        system_story_instruction = (
+            "You are an elite QA Automation Architect.\n"
+            "Your role is to analyze the sprint / story requirements and extract the actual business rules, validation rules, security rules, and authorization rules.\n"
+            "You MUST output ONLY a raw JSON list matching the specified format, with no conversational text, introduction, explanation, or notes. Your response must start with '[' and end with ']'.\n"
+            "CRITICAL: Extract a separate rule for EVERY single acceptance criterion and requirement statement. Do NOT combine or omit any acceptance criteria. If there are 7 criteria in the story, you MUST generate at least 7 corresponding rule objects in the JSON."
+        )
+        response = await llm.ainvoke([SystemMessage(content=system_story_instruction), HumanMessage(content=story_prompt)])
         rules_data = extract_json_list(response.content)
         if not rules_data:
             rules_data = extract_rules_from_text(response.content)
@@ -990,16 +1096,23 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
             code_lower = code_context.lower()
             
             # Also invoke LLM to cross-verify implementation presence
+            summary_context = get_codebase_summary(code_context)
             check_prompt = f"""
             You are a Senior Software Architect and QA Auditor.
             Evaluate whether each of the following story rules has matching source code, functions, or class implementations in the provided codebase context.
-            If a function, endpoint, or class implementing the rule is missing in the code, mark "has_code_mapping" as false and explain what function/code is missing.
+            
+            --- CRITICAL MAPPING RULES ---
+            - BE ACCURATE AND REALISTIC. Match a rule to the codebase if there is a function, endpoint, or class method in the codebase context that corresponds to the requirement's target action.
+            - For example, if a rule mentions "uploading source code or artifact", and the codebase context contains a function named `upload_artifact` or `upload_file`, this is a MATCH! You MUST set "has_code_mapping": true.
+            - If a rule mentions "generating test cases automatically", and the codebase has functions like `generate_tests` or `run_agent_workflow` that initiate the generation, this is a MATCH! You MUST set "has_code_mapping": true.
+            - However, if a rule mentions a requirement that has NO corresponding functional implementation in the codebase context (e.g., "publishing test cases to Jira" or "creating Jira issues", but the codebase context only has a function to connect or fetch tickets like `fetch_jira_tickets` and NO issue creation/publishing function), then the logic is MISSING. In this case, you MUST set "has_code_mapping": false and set "missing_reason" to "Jira issue creation/publishing functions are missing in the repository".
+            - Do not mark a rule as mapped if there is absolutely no logic for it in the codebase. But do mark it as mapped if a corresponding handler, router, service class, or helper method exists in the codebase context.
 
             --- STORY RULES ---
             {json.dumps([{"code": r.get("code"), "story_name": r.get("story_name"), "text": r.get("text")} for r in rules_data], indent=2)}
 
             --- CODEBASE CONTEXT ---
-            {code_context[:9000]}
+            {summary_context}
 
             --- RESPONSE FORMAT ---
             Format your response EXACTLY as a JSON list:
@@ -1011,32 +1124,30 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
               }}
             ]
             """
+            system_instruction = (
+                "You are an elite Senior Software Architect and QA Auditor.\n"
+                "Your role is to verify if story rules are implemented in the codebase accurately and realistically.\n"
+                "You MUST output ONLY a raw JSON list matching the specified format, with no conversational text, introduction, explanation, or notes. Your response must start with '[' and end with ']'.\n"
+                "BE BALANCED AND ACCURATE: Set has_code_mapping to true if a corresponding handler or function exists, but false if the core action/logic is completely missing."
+            )
             try:
-                check_resp = await llm.ainvoke([HumanMessage(content=check_prompt)])
+                check_resp = await llm.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=check_prompt)])
                 check_results = extract_json_list(check_resp.content)
                 check_map = {item.get("code"): item for item in check_results if isinstance(item, dict) and "code" in item}
                 
                 for r in rules_data:
                     c_info = check_map.get(r.get("code"))
                     if c_info:
-                        r["has_code_mapping"] = bool(c_info.get("has_code_mapping", True))
+                        r["has_code_mapping"] = bool(c_info.get("has_code_mapping", False))
                         r["missing_reason"] = c_info.get("missing_reason") if not r["has_code_mapping"] else None
                     else:
-                        # Fallback heuristic: check if any keyword from rule exists in code
-                        r_text = (r.get("text", "") + " " + r.get("story_name", "")).lower()
-                        keywords = [w for w in re.findall(r'\b[a-z]{4,}\b', r_text) if w not in ['user', 'test', 'must', 'that', 'should', 'with', 'from', 'when', 'then']]
-                        matches = sum(1 for kw in keywords if kw in code_lower)
-                        if matches > 0:
-                            r["has_code_mapping"] = True
-                            r["missing_reason"] = None
-                        else:
-                            r["has_code_mapping"] = False
-                            r["missing_reason"] = f"No matching function or method found in codebase for {r.get('story_name', 'story')}"
+                        r["has_code_mapping"] = False
+                        r["missing_reason"] = f"No explicit code implementation found for rule {r.get('code')} in codebase."
             except Exception as e:
                 await broadcast_log(session_id, f"[Requirement Decomposition Warning] Code mapping check failed: {str(e)}")
                 for r in rules_data:
-                    r["has_code_mapping"] = True
-                    r["missing_reason"] = None
+                    r["has_code_mapping"] = False
+                    r["missing_reason"] = "Could not verify codebase implementation presence." 
         elif rules_data and not code_context:
             # No codebase connected or empty code context
             for r in rules_data:
@@ -1165,6 +1276,7 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
             pass
 
     rules_text = "\n".join([f"- {r['rule_code']}: {r['rule_text']} ({r['rule_type']})" for r in state.get("parsed_requirements", [])])
+    summary_context = get_codebase_summary(code_context)
 
     services_data = []
     try:
@@ -1188,7 +1300,7 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
         {rules_text}
         
         [Existing Codebase Context]:
-        {code_context}
+        {summary_context}
 
         --- RESPONSE FORMAT ---
         Identify the correct classes/files and target methods.
@@ -1202,7 +1314,13 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
         ]
         """
         await broadcast_log(session_id, "[Service Contract] Calling LLM to define service test boundaries...")
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        system_instruction = (
+            "You are an elite QA Automation Architect and Software Engineer.\n"
+            "Your role is to analyze the extracted business rules and map them to their actual service classes, modules, and target methods.\n"
+            "You MUST output ONLY a raw JSON list matching the specified format, with no conversational text, introduction, explanation, or notes. Your response must start with '[' and end with ']'.\n"
+            "Do NOT include any classes, methods, or helper files that are not directly relevant to the business rules."
+        )
+        response = await llm.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=prompt)])
         services_data = extract_json_list(response.content)
         if not services_data:
             # Fallback to regex-based text parsing if JSON parsing returned empty
@@ -1216,23 +1334,12 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
     except Exception as e:
         await broadcast_log(session_id, f"[Service Contract Warning] Proposing service boundaries failed: {str(e)}. Using fallback boundaries.")
 
-    # Dynamic fallback if empty or placeholder
+    # No fallbacks. If empty, keep it empty.
     if not services_data:
-        services_data = extract_services_from_code_context(code_context)
-        
-    # Absolute fallback if still empty
-    if not services_data:
-        repo_name = git_url.split('/')[-1].replace('.git', '') if git_url else 'App'
-        services_data = [
-            {
-                "name": f"{repo_name.title().replace('-', '').replace('_', '').replace('_', '')}Service",
-                "methods": ["process", "validate"],
-                "dependencies": ["DatabaseRepository"]
-            }
-        ]
+        services_data = []
 
     # Filter proposed target methods to only include those mentioned/referenced in the core business rules
-    services_data = filter_services_by_rules(services_data, state.get("parsed_requirements", []))
+    # services_data = filter_services_by_rules(services_data, state.get("parsed_requirements", []))
 
     async with AsyncSessionLocal() as db:
         is_incremental = state.get("is_incremental", False)
@@ -1610,27 +1717,35 @@ async def coverage_reviewer_node(state: AgentWorkflowState) -> AgentWorkflowStat
         generated_tests = state.get("generated_tests", [])
         
         for r in reqs:
-            # Simple heuristic mapping: find if rule_code exists in the test file code, or assign to first/sensible test
-            status = "AMBIGUOUS"
-            mapped_test_name = "UnknownTest"
+            status = "GAP"
+            mapped_test_name = "N/A (No Code in Repo)"
             
-            for test in generated_tests:
-                if r.rule_code in test["code"] or r.rule_code.lower() in test["code"].lower() or len(generated_tests) == 1:
+            # A rule can only be covered if it actually exists in the codebase
+            if getattr(r, "has_code_mapping", True):
+                mapped_test_name = "UnknownTest"
+                for test in generated_tests:
+                    if r.rule_code in test["code"] or r.rule_code.lower() in test["code"].lower() or len(generated_tests) == 1:
+                        status = "COVERED"
+                        mapped_test_name = test["test_name"]
+                        break
+                
+                # Heuristic fallback if not matched but tests exist
+                if mapped_test_name == "UnknownTest" and generated_tests:
                     status = "COVERED"
-                    mapped_test_name = test["test_name"]
-                    break
-            
-            # Heuristic fallback if not matched
-            if mapped_test_name == "UnknownTest" and generated_tests:
-                status = "COVERED"
-                mapped_test_name = generated_tests[0]["test_name"]
+                    mapped_test_name = generated_tests[0]["test_name"]
+                elif mapped_test_name == "UnknownTest":
+                    status = "GAP"
+                    mapped_test_name = "No Test Generated"
+            else:
+                status = "GAP"
+                mapped_test_name = "N/A (No Code in Repo)"
 
             matrix_entry = CoverageMatrix(
                 session_id=session_id,
                 req_id=r.req_id,
                 rule_code=r.rule_code,
                 rule_text=r.rule_text,
-                service_name=mapped_test_name.split("Test")[0],
+                service_name=mapped_test_name.split("Test")[0] if "Test" in mapped_test_name else "N/A",
                 test_name=mapped_test_name,
                 status=status,
                 story_name=r.story_name,
