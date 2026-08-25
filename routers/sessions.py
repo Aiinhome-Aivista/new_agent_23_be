@@ -117,6 +117,64 @@ async def run_agent_workflow(session_id: str):
     except Exception as e:
         await broadcast_log(session_id, f"[Error] Agent Workflow Failed: {str(e)} [END_OF_STREAM]")
 
+class GitCheckRequest(BaseModel):
+    git_url: str
+
+@router.post("/sessions/check-git-repo")
+async def check_git_repo(payload: GitCheckRequest):
+    url = payload.git_url
+    if not url:
+        return {"status": "empty", "message": "Repository URL is empty."}
+    
+    import subprocess
+    import os
+    
+    cmd = ["git", "-c", "credential.helper=", "ls-remote", url]
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    for key in list(env.keys()):
+        if "VSCODE_GIT" in key or "VSCODE_ASKPASS" in key:
+            del env[key]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=10)
+        if result.returncode == 0:
+            return {"status": "public", "message": "Repository is public and accessible."}
+        else:
+            stderr = result.stderr or ""
+            stdout = result.stdout or ""
+            err_msg = (stderr + stdout).lower()
+            
+            # Identify if it is likely a private repository
+            if (
+                "terminal prompts disabled" in err_msg or 
+                "authentication failed" in err_msg or 
+                "not found" in err_msg or 
+                "could not read username" in err_msg or
+                "permission denied" in err_msg or
+                "403" in err_msg or
+                "401" in err_msg or
+                "unauthorized" in err_msg or
+                "forbidden" in err_msg or
+                "access denied" in err_msg
+            ):
+                return {
+                    "status": "private",
+                    "message": "Repository requires authentication (private repository)."
+                }
+            else:
+                return {
+                    "status": "invalid",
+                    "message": f"Failed to connect to the repository: {stderr.strip() or 'Unknown error'}"
+                }
+    except Exception as e:
+        return {
+            "status": "invalid",
+            "message": f"Error checking repository: {str(e)}"
+        }
+
 class GitConfigRequest(BaseModel):
     git_url: Optional[str] = None
     git_branch: Optional[str] = None

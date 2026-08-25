@@ -28,6 +28,11 @@ def clone_repo(git_url: str, branch: Optional[str] = None) -> str:
     
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    for key in list(env.keys()):
+        if "VSCODE_GIT" in key or "VSCODE_ASKPASS" in key:
+            del env[key]
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         # Clean up directory if clone failed
@@ -179,6 +184,11 @@ def validate_git_connection(git_url: str) -> bool:
     cmd = ["git", "-c", "credential.helper=", "ls-remote", git_url]
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    for key in list(env.keys()):
+        if "VSCODE_GIT" in key or "VSCODE_ASKPASS" in key:
+            del env[key]
     
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=10)
