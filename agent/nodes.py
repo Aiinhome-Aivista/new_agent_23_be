@@ -760,7 +760,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                     }
                     exclude_dirs = {
                         '.git', 'node_modules', 'venv', 'env', 'build', 'target', 'dist', 
-                        'test', 'tests', '__pycache__', '.idea', '.vscode', 'gradle', '.settings', 'bin', 'obj'
+                        'test', 'tests', '__pycache__', '.idea', '.vscode', 'gradle', '.settings', 'bin', 'obj',
+                        'migrations'
                     }
                     
                     code_context_parts = []
@@ -777,6 +778,10 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                             
                         path_parts = norm_rel.lower().split("/")
                         if any(part in exclude_dirs or 'test' in part for part in path_parts):
+                            continue
+                            
+                        file_basename = os.path.basename(norm_rel).lower()
+                        if any(k in file_basename for k in ['settings', 'wsgi', 'asgi', 'manage.py']):
                             continue
                             
                         file_path = os.path.join(temp_path, norm_rel)
@@ -829,9 +834,23 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
             filename = first_line.split(" ===")[0].strip()
             content = "\n".join(lines[1:])
             
-            # Target logic files (app.py, controllers, agents)
+            # Target logic files (views, controllers, services, routes, handlers, urls, and app/main entry points)
             name_lower = filename.lower()
-            if "controller" in name_lower or "agent" in name_lower or filename == "app.py":
+            is_logic_file = (
+                "controller" in name_lower or
+                "agent" in name_lower or
+                "view" in name_lower or
+                "service" in name_lower or
+                "route" in name_lower or
+                "handler" in name_lower or
+                "url" in name_lower or
+                filename in ["app.py", "main.py", "server.js", "app.js", "main.go", "app.ts", "server.ts"]
+            )
+            # NEVER extract rules directly from migrations, schemas, settings, or tests
+            if any(k in name_lower for k in ["migration", "schema", "setting", "test", "spec"]):
+                is_logic_file = False
+                
+            if is_logic_file:
                 target_files.append((filename, content))
                 
         # Run targeted rule extraction for each file
@@ -840,16 +859,23 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 await broadcast_log(session_id, f"[Requirement Decomposition] Extracting rules from {filename}...")
                 prompt = f"""
                 You are an elite QA Automation Architect.
-                Analyze the following code file `{filename}` and extract all testable business rules, validation bounds, access controls, and error paths defined in it.
+                Analyze the following code file `{filename}` in the context of the provided Sprint/Story requirements.
+                Extract ONLY the testable business rules, validation bounds, access controls, and error paths defined in it that are relevant to or affected by the requirements.
+
+                --- SPRINT/STORY REQUIREMENTS ---
+                {combined_artifacts}
 
                 --- RULES TO FOLLOW ---
+                - ONLY extract rules for functions, methods, variables, or endpoints that are EXPLICITLY implemented in the provided --- FILE CONTENT ---.
+                - DO NOT invent, hallucinate, or assume any functions, names, endpoints, or rules that are not present in the code.
+                - If Sprint/Story requirements are provided, only extract rules from this file that are directly relevant to, affected by, or mentioned in those requirements.
                 - DO NOT return general file summaries, overview text, or introductory explanations.
-                - Extract ACTUAL, testable validations and logic gates (e.g. checking file size, empty strings, payload format).
-                - Limit rules to the logic present in this specific file.
+                - Extract ACTUAL, testable validations and logic gates (e.g. checking parameter ranges, type validations, empty conditions).
+                - Limit rules STRICTLY to the code logic present in this specific file.
                 
-                Examples of GOOD rules:
-                - "Validate that upload_case_study rejects files if the filename is empty."
-                - "Ensure calculate_budget raises a ValueError if the inputs are negative."
+                --- FORMATTING GUIDELINE EXAMPLES (DO NOT COPY OR REFERENCE THESE DUMMY NAMES/CONCEPTS) ---
+                - "Validate that dummy_function_name rejects input if parameter_name is empty."
+                - "Ensure dummy_calculation raises an error if inputs are negative."
 
                 --- FILE CONTENT ---
                 {content}
@@ -951,6 +977,49 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
     state["current_node"] = "decomposition"
     return state
 
+def filter_services_by_rules(services_data: list, rules_list: list) -> list:
+    """
+    Filters target methods in services to only those that are mentioned/referenced
+    in the extracted business rules to prevent unrelated methods from showing up.
+    """
+    if not services_data or not rules_list:
+        return services_data
+
+    # Collect all rule texts and lowercase them for mapping
+    combined_rules_text = " ".join([r.get("rule_text", "").lower() for r in rules_list])
+    normalized_rules_text = re.sub(r'[^a-z0-9]', '', combined_rules_text)
+    
+    filtered_services = []
+    for s in services_data:
+        name = s.get("name")
+        methods = s.get("methods") or []
+        dependencies = s.get("dependencies") or []
+        
+        filtered_methods = []
+        for m in methods:
+            m_lower = m.lower()
+            
+            # 1. Direct word boundary check (e.g. \bcreateaccount\b)
+            pattern = r'\b' + re.escape(m_lower) + r'\b'
+            if re.search(pattern, combined_rules_text):
+                filtered_methods.append(m)
+                continue
+                
+            # 2. Normalized check for matches like "create_account" vs "createaccount"
+            m_norm = re.sub(r'[^a-z0-9]', '', m_lower)
+            if len(m_norm) >= 4 and m_norm in normalized_rules_text:
+                filtered_methods.append(m)
+                continue
+                
+        if filtered_methods:
+            filtered_services.append({
+                "name": name,
+                "methods": filtered_methods,
+                "dependencies": dependencies
+            })
+            
+    return filtered_services
+
 async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState:
     session_id = state['session_id']
     await broadcast_log(session_id, "[Service Contract] Identifying service boundaries, methods, and mock collaborators...")
@@ -979,6 +1048,10 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
         Your task is to analyze the extracted business rules and the existing codebase context to map the rules to their actual service classes, modules, and target methods that need unit test coverage.
 
         --- CRITICAL INSTRUCTIONS ---
+        - ONLY map and include methods/functions that directly implement, handle, or are triggered by the provided [Extracted Business Rules].
+        - DO NOT include unrelated methods from the same class or module. If the rules only pertain to a specific feature or workflow (e.g., creation or validation), you MUST NOT map methods for separate operations (e.g., update, deletion, search, initialization, or other workflows) even if they are defined in the same file or class.
+        - NEVER include database migrations, configuration files, package init files, or schema setup files. These are not testable business services.
+        - Do not include any service/controller class or module if none of its methods are relevant to the [Extracted Business Rules].
         - DO NOT hallucinate class names, services, methods, or dependencies that DO NOT exist in the codebase context.
         - The proposed "name" must match an actual class name, controller, or module filename in the codebase (e.g. "CaseStudyController" or "CaseStudyService").
         - The proposed "methods" MUST match the exact function names/method signatures defined in the codebase context (e.g. if the code defines "def upload_case_study():", the method name must be "upload_case_study"). Do NOT rename them to Java CamelCase (e.g., do not turn "upload_case_study" into "uploadCaseStudy").
@@ -1031,6 +1104,9 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
                 "dependencies": ["DatabaseRepository"]
             }
         ]
+
+    # Filter proposed target methods to only include those mentioned/referenced in the core business rules
+    services_data = filter_services_by_rules(services_data, state.get("parsed_requirements", []))
 
     async with AsyncSessionLocal() as db:
         is_incremental = state.get("is_incremental", False)

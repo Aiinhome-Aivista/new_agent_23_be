@@ -89,7 +89,8 @@ def get_code_files(repo_path: str, target_subpath: Optional[str] = None, max_siz
     
     exclude_dirs = {
         '.git', 'node_modules', 'venv', 'env', 'build', 'target', 'dist', 
-        'test', 'tests', '__pycache__', '.idea', '.vscode', 'gradle', '.settings', 'bin', 'obj'
+        'test', 'tests', '__pycache__', '.idea', '.vscode', 'gradle', '.settings', 'bin', 'obj',
+        'migrations'
     }
 
     code_context = []
@@ -103,8 +104,19 @@ def get_code_files(repo_path: str, target_subpath: Optional[str] = None, max_siz
             ext = os.path.splitext(file)[1].lower()
             if ext in allowed_extensions:
                 file_path = os.path.join(root, file)
-                # Skip test files, system prompts, pricing knowledge bases and slide generators
-                if 'test' in file.lower() or 'spec' in file.lower() or 'prompts' in file.lower() or 'pptx' in file.lower() or 'pricing_kb' in file.lower():
+                # Skip test files, system prompts, pricing knowledge bases, django boilerplates, settings, manage.py, wsgi, asgi
+                file_lower = file.lower()
+                if (
+                    'test' in file_lower or 
+                    'spec' in file_lower or 
+                    'prompts' in file_lower or 
+                    'pptx' in file_lower or 
+                    'pricing_kb' in file_lower or
+                    'settings' in file_lower or
+                    'wsgi' in file_lower or
+                    'asgi' in file_lower or
+                    file_lower == 'manage.py'
+                ):
                     continue
                 try:
                     file_size = os.path.getsize(file_path)
