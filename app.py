@@ -24,6 +24,36 @@ def startup_event():
         # Create all database tables locally on startup
         Base.metadata.create_all(bind=engine)
         print("Database schema initialized successfully (utgc_agent.db).")
+        
+        # Run local migrations for SQLite database to add new columns if they do not exist
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            # Check and add columns to requirement_decompositions
+            try:
+                result = conn.execute(text("PRAGMA table_info(requirement_decompositions)")).fetchall()
+                existing_cols = [r[1] for r in result]
+                if "story_name" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN story_name VARCHAR(255)"))
+                    print("Migration: Added story_name to requirement_decompositions")
+                if "story" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN story TEXT"))
+                    print("Migration: Added story to requirement_decompositions")
+            except Exception as e:
+                print(f"Migration warning (requirement_decompositions): {e}")
+
+            # Check and add columns to coverage_matrices
+            try:
+                result = conn.execute(text("PRAGMA table_info(coverage_matrices)")).fetchall()
+                existing_cols = [r[1] for r in result]
+                if "story_name" not in existing_cols:
+                    conn.execute(text("ALTER TABLE coverage_matrices ADD COLUMN story_name VARCHAR(255)"))
+                    print("Migration: Added story_name to coverage_matrices")
+                if "story" not in existing_cols:
+                    conn.execute(text("ALTER TABLE coverage_matrices ADD COLUMN story TEXT"))
+                    print("Migration: Added story to coverage_matrices")
+            except Exception as e:
+                print(f"Migration warning (coverage_matrices): {e}")
+                
     except Exception as e:
         print(f"Database startup warning: {e}")
 
