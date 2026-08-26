@@ -147,14 +147,13 @@ def cleanup_repo(repo_path: str):
     if os.path.exists(repo_path):
         shutil.rmtree(repo_path, onerror=on_rm_error)
 
-def validate_git_connection(git_url: str) -> bool:
+def validate_git_connection(git_url: str, branch: Optional[str] = None) -> tuple[bool, str]:
     """
-    Checks if the Git repository URL is accessible and the credentials/token are valid.
-    For public repos, git ls-remote succeeds anonymously even with a wrong token.
-    Therefore, we also explicitly validate the token using the hosting provider's API.
+    Checks if the Git repository URL is accessible and the credentials/token/branch are valid.
+    Returns (is_valid, error_message).
     """
     if not git_url:
-        return True
+        return True, ""
     
     # 1. Parse and validate the token via API if present
     try:
@@ -171,16 +170,16 @@ def validate_git_connection(git_url: str) -> bool:
                 headers = {"Authorization": f"token {token}"}
                 response = requests.get("https://api.github.com/user", headers=headers, timeout=5)
                 if response.status_code == 401:
-                    return False
+                    return False, "Invalid GitHub authentication token provided."
             elif "gitlab.com" in host.lower():
                 headers = {"PRIVATE-TOKEN": token}
                 response = requests.get("https://gitlab.com/api/v4/user", headers=headers, timeout=5)
                 if response.status_code == 401:
-                    return False
+                    return False, "Invalid GitLab authentication token provided."
     except Exception:
         pass # Fallback to git command if API call fails due to network/rate-limiting
         
-    # 2. Run git command validation
+    # 2. Run git command validation for repository accessibility
     cmd = ["git", "-c", "credential.helper=", "ls-remote", git_url]
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -192,7 +191,22 @@ def validate_git_connection(git_url: str) -> bool:
     
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=10)
-        return result.returncode == 0
-    except Exception:
-        return False
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            return False, f"Could not connect to Git repository: {err or 'Repository not found or access denied.'}"
+    except Exception as e:
+        return False, f"Failed to connect to Git repository: {str(e)}"
+
+    # 3. If branch specified, verify branch existence on remote
+    if branch and branch.strip():
+        clean_branch = branch.strip()
+        branch_cmd = ["git", "-c", "credential.helper=", "ls-remote", "--heads", git_url, clean_branch]
+        try:
+            b_res = subprocess.run(branch_cmd, capture_output=True, text=True, env=env, timeout=10)
+            if b_res.returncode != 0 or not b_res.stdout.strip():
+                return False, f"Branch '{clean_branch}' was not found in remote repository '{git_url}'. Please check the branch name."
+        except Exception:
+            pass
+
+    return True, ""
 

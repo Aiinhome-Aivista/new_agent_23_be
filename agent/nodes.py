@@ -995,7 +995,16 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
             cleanup_repo(temp_path)
             await broadcast_log(session_id, f"[Git Integration] Successfully cloned and scanned codebase context.")
         except Exception as e:
-            await broadcast_log(session_id, f"[Git Integration Warning] Failed to fetch git codebase: {str(e)}")
+            git_err_str = str(e)
+            await broadcast_log(session_id, f"[Git Integration Error] Failed to fetch git codebase: {git_err_str}")
+            async with AsyncSessionLocal() as db:
+                s_res = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+                s_obj = s_res.scalar_one_or_none()
+                if s_obj:
+                    p = dict(s_obj.tech_profile) if s_obj.tech_profile else {}
+                    p["git_error"] = f"Failed to clone Git repository: {git_err_str}"
+                    s_obj.tech_profile = p
+                    await db.commit()
 
     # Detect codebase language & audit against selected Target Language
     detected_lang_info = detect_codebase_language(code_context)

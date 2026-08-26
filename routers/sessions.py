@@ -189,10 +189,11 @@ async def trigger_decompose(
 ):
     if payload.git_url:
         from utils.git_utils import validate_git_connection
-        if not validate_git_connection(payload.git_url):
+        is_valid, git_err = validate_git_connection(payload.git_url, branch=payload.git_branch)
+        if not is_valid:
             raise HTTPException(
                 status_code=400, 
-                detail="Invalid Git Repository URL or authentication token. Connection check failed."
+                detail=git_err or "Invalid Git Repository URL, branch, or authentication token. Connection check failed."
             )
 
     result = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
