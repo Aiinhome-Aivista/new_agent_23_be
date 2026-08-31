@@ -53,8 +53,21 @@ def startup_event():
                 if "alignment_status" not in existing_cols:
                     conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN alignment_status VARCHAR(50)"))
                     print("Migration: Added alignment_status to requirement_decompositions")
+                if "target_code_snippet" not in existing_cols:
+                    conn.execute(text("ALTER TABLE requirement_decompositions ADD COLUMN target_code_snippet TEXT"))
+                    print("Migration: Added target_code_snippet to requirement_decompositions")
             except Exception as e:
                 print(f"Migration warning (requirement_decompositions): {e}")
+
+            # Check and add columns to service_contracts
+            try:
+                result = conn.execute(text("PRAGMA table_info(service_contracts)")).fetchall()
+                existing_cols = [r[1] for r in result]
+                if "target_code_snippets" not in existing_cols:
+                    conn.execute(text("ALTER TABLE service_contracts ADD COLUMN target_code_snippets TEXT"))
+                    print("Migration: Added target_code_snippets to service_contracts")
+            except Exception as e:
+                print(f"Migration warning (service_contracts): {e}")
 
             # Check and add columns to coverage_matrices
             try:

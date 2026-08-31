@@ -1104,18 +1104,28 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
             # Extract known function and class identifiers from the codebase for deterministic cross-check
             code_lower = code_context.lower()
             
-            # Also invoke LLM to cross-verify implementation presence
+            # Also invoke LLM to cross-verify implementation presence and extract specific target code snippets
             summary_context = get_codebase_summary(code_context)
             check_prompt = f"""
             You are a Senior Software Architect and QA Auditor.
-            Evaluate whether each of the following story rules has matching source code, functions, or class implementations in the provided codebase context.
+            Evaluate whether each of the following story rules has matching source code, functions, or specific validation/logic implementations in the provided codebase context.
+
+            --- CRITICAL MAPPING & SNIPPET EXTRACTION RULES ---
+            1. ACCURATE SNIPPET IDENTIFICATION & EXTRACTION:
+               - If a story rule specifies a specific validation rule, payload constraint, or logic block (e.g., "validate email format", "check minimum age >= 18", "user role must be Admin"):
+                 * Search the codebase context for the EXACT lines of code / validation snippet (`target_code_snippet`) that perform this validation or logic.
+                 * Extract the concise code snippet (e.g. 2-10 lines of code showing the actual `if` condition, regex check, annotation, or assertion).
+                 * If found, set `"has_code_mapping": true`, `"missing_reason": null`, and include the exact `"target_code_snippet"`.
             
-            --- CRITICAL MAPPING RULES ---
-            - BE ACCURATE AND REALISTIC. Match a rule to the codebase if there is a function, endpoint, or class method in the codebase context that corresponds to the requirement's target action.
-            - For example, if a rule mentions "uploading source code or artifact", and the codebase context contains a function named `upload_artifact` or `upload_file`, this is a MATCH! You MUST set "has_code_mapping": true.
-            - If a rule mentions "generating test cases automatically", and the codebase has functions like `generate_tests` or `run_agent_workflow` that initiate the generation, this is a MATCH! You MUST set "has_code_mapping": true.
-            - However, if a rule mentions a requirement that has NO corresponding functional implementation in the codebase context (e.g., "publishing test cases to Jira" or "creating Jira issues", but the codebase context only has a function to connect or fetch tickets like `fetch_jira_tickets` and NO issue creation/publishing function), then the logic is MISSING. In this case, you MUST set "has_code_mapping": false and set "missing_reason" to "Jira issue creation/publishing functions are missing in the repository".
-            - Do not mark a rule as mapped if there is absolutely no logic for it in the codebase. But do mark it as mapped if a corresponding handler, router, service class, or helper method exists in the codebase context.
+            2. GRANULAR MISSING VALIDATION CHECK (SPECIFIC CODE LOGIC VS WHOLE FUNCTION):
+               - If the parent function/method exists (e.g. `createaccount` or `process_order`), BUT the SPECIFIC validation rule or code logic requested in the story is MISSING inside that function:
+                 * YOU MUST SET `"has_code_mapping": false`!
+                 * Set `"target_code_snippet": null`.
+                 * Set `"missing_reason": "Function 'createaccount' exists, but the specific validation 'Phone number format check' requested in rule VR-002 is missing inside the function logic."`
+               - DO NOT mark `has_code_mapping: true` just because the outer function exists if the required validation/logic inside it is missing!
+
+            3. COMPLETELY MISSING FUNCTIONS / FEATURES:
+               - If neither the function nor the logic exists, set `"has_code_mapping": false`, `"target_code_snippet": null`, and state which function/feature is missing in `"missing_reason"`.
 
             --- STORY RULES ---
             {json.dumps([{"code": r.get("code"), "story_name": r.get("story_name"), "text": r.get("text")} for r in rules_data], indent=2)}
@@ -1123,21 +1133,31 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
             --- CODEBASE CONTEXT ---
             {summary_context}
 
+            --- SOURCE CODE FILE SNIPPETS ---
+            {code_context[:12000]}
+
             --- RESPONSE FORMAT ---
-            Format your response EXACTLY as a JSON list:
+            Format your response EXACTLY as a JSON list without comments:
             [
               {{
-                "code": "BR-001",
-                "has_code_mapping": true, // true if matching function/class exists in code, false if code/function is not found
-                "missing_reason": null // null if true, or e.g. "Function 'smsOtpVerification' not found in repository" if false
+                "code": "VR-001",
+                "has_code_mapping": true,
+                "missing_reason": null,
+                "target_code_snippet": "if (!email.matches(\"^[A-Za-z0-9+_.-]+@(.+)$\")) {{\n    throw new InvalidPayloadException(\"Invalid email format\");\n}}"
+              }},
+              {{
+                "code": "VR-002",
+                "has_code_mapping": false,
+                "missing_reason": "Function 'registerUser' exists, but specific validation for 'phoneNumber E.164 format' is missing inside the function.",
+                "target_code_snippet": null
               }}
             ]
             """
             system_instruction = (
                 "You are an elite Senior Software Architect and QA Auditor.\n"
-                "Your role is to verify if story rules are implemented in the codebase accurately and realistically.\n"
+                "Your role is to verify if story rules and specific validation snippets are implemented in the codebase accurately.\n"
                 "You MUST output ONLY a raw JSON list matching the specified format, with no conversational text, introduction, explanation, or notes. Your response must start with '[' and end with ']'.\n"
-                "BE BALANCED AND ACCURATE: Set has_code_mapping to true if a corresponding handler or function exists, but false if the core action/logic is completely missing."
+                "Extract exact target_code_snippets when mapped. Set has_code_mapping to false if the specific validation logic inside a function is missing."
             )
             try:
                 check_resp = await llm.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=check_prompt)])
@@ -1149,19 +1169,23 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                     if c_info:
                         r["has_code_mapping"] = bool(c_info.get("has_code_mapping", False))
                         r["missing_reason"] = c_info.get("missing_reason") if not r["has_code_mapping"] else None
+                        r["target_code_snippet"] = c_info.get("target_code_snippet") if r["has_code_mapping"] else None
                     else:
                         r["has_code_mapping"] = False
-                        r["missing_reason"] = f"No explicit code implementation found for rule {r.get('code')} in codebase."
+                        r["missing_reason"] = f"No explicit code implementation or validation logic found for rule {r.get('code')} in codebase."
+                        r["target_code_snippet"] = None
             except Exception as e:
                 await broadcast_log(session_id, f"[Requirement Decomposition Warning] Code mapping check failed: {str(e)}")
                 for r in rules_data:
                     r["has_code_mapping"] = False
-                    r["missing_reason"] = "Could not verify codebase implementation presence." 
+                    r["missing_reason"] = "Could not verify codebase implementation presence."
+                    r["target_code_snippet"] = None
         elif rules_data and not code_context:
             # No codebase connected or empty code context
             for r in rules_data:
                 r["has_code_mapping"] = False
                 r["missing_reason"] = "No codebase repository was provided or repository contains no source code."
+                r["target_code_snippet"] = None
     except Exception as e:
         await broadcast_log(session_id, f"[Requirement Decomposition Warning] Extraction failed: {str(e)}")
 
@@ -1176,7 +1200,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 "text": f"Validate core business logic and workflows for {repo_name} components.",
                 "type": "BUSINESS_RULE",
                 "has_code_mapping": bool(code_context),
-                "missing_reason": None if code_context else "No codebase repository provided"
+                "missing_reason": None if code_context else "No codebase repository provided",
+                "target_code_snippet": None
             }
         ]
 
@@ -1199,7 +1224,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 story=r.get("story", ""),
                 source_reference="Sprint_Story_Artifacts",
                 has_code_mapping=r.get("has_code_mapping", True),
-                missing_reason=r.get("missing_reason")
+                missing_reason=r.get("missing_reason"),
+                target_code_snippet=r.get("target_code_snippet")
             )
             db.add(decomp)
             await db.flush()
@@ -1211,7 +1237,8 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
                 "story_name": decomp.story_name,
                 "story": decomp.story,
                 "has_code_mapping": decomp.has_code_mapping,
-                "missing_reason": decomp.missing_reason
+                "missing_reason": decomp.missing_reason,
+                "target_code_snippet": decomp.target_code_snippet
             })
         await db.commit()
 
@@ -1362,11 +1389,19 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
 
         state["service_contracts"] = []
         for s in services_data:
+            # Associate identified target code snippets for this service from parsed_requirements
+            srv_snippets = []
+            for req in state.get("parsed_requirements", []):
+                snippet = req.get("target_code_snippet")
+                if snippet and snippet not in srv_snippets:
+                    srv_snippets.append(snippet)
+
             contract = ServiceContract(
                 session_id=session_id,
                 name=s.get("name", "UnknownService"),
                 methods=s.get("methods", []),
                 dependencies=s.get("dependencies", []),
+                target_code_snippets=srv_snippets,
                 status="PROPOSED"
             )
             db.add(contract)
@@ -1375,7 +1410,8 @@ async def service_contract_node(state: AgentWorkflowState) -> AgentWorkflowState
                 "service_id": contract.service_id,
                 "name": contract.name,
                 "methods": contract.methods,
-                "dependencies": contract.dependencies
+                "dependencies": contract.dependencies,
+                "target_code_snippets": contract.target_code_snippets
             })
         await db.commit()
 
@@ -1403,6 +1439,14 @@ async def unit_test_design_node(state: AgentWorkflowState) -> AgentWorkflowState
 
     rules_text = "\n".join([f"- {r['rule_code']}: {r['rule_text']}" for r in state.get("parsed_requirements", [])])
     
+    # Gather identified target code snippets from rules
+    snippets_list = []
+    for r in state.get("parsed_requirements", []):
+        snip = r.get("target_code_snippet")
+        if snip:
+            snippets_list.append(f"--- Code Snippet for Rule {r.get('rule_code')} ---\n{snip}")
+    snippets_text = "\n\n".join(snippets_list) if snippets_list else "No specific code snippets identified; test whole target methods."
+
     state["generated_tests"] = []
     
     # 1. Fetch services in a short-lived transaction to avoid locking DB during LLM calls
@@ -1414,7 +1458,8 @@ async def unit_test_design_node(state: AgentWorkflowState) -> AgentWorkflowState
                 "service_id": s.service_id,
                 "name": s.name,
                 "methods": s.methods,
-                "dependencies": s.dependencies
+                "dependencies": s.dependencies,
+                "target_code_snippets": s.target_code_snippets
             })
             
     is_incremental = state.get("is_incremental", False)
@@ -1447,6 +1492,13 @@ async def unit_test_design_node(state: AgentWorkflowState) -> AgentWorkflowState
 
             Methods to test: {s_dict['methods']}
             Mock collaborators / dependencies: {s_dict['dependencies']}
+
+            --- IDENTIFIED TARGET CODE SNIPPETS & VALIDATION LOGIC TO TEST ---
+            {snippets_text}
+
+            CRITICAL UNIT TEST SCOPE INSTRUCTION:
+            - You MUST generate unit test cases that directly target, validate, and test the identified code snippets / validation logic blocks above.
+            - Ensure tests cover boundary cases, valid inputs, invalid inputs, edge conditions, and error/exception paths for those specific snippets.
 
             --- EXISTING CODEBASE CONTEXT ---
             {code_context}

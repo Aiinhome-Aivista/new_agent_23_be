@@ -75,6 +75,7 @@ class RequirementDecomposition(Base):
     story = Column(Text, nullable=True)
     has_code_mapping = Column(Boolean, default=True)
     missing_reason = Column(Text, nullable=True)
+    target_code_snippet = Column(Text, nullable=True)
     ai_validation_score = Column(Integer, nullable=True)
     ai_feedback = Column(Text, nullable=True)
     alignment_status = Column(String(50), nullable=True)
@@ -88,6 +89,7 @@ class ServiceContract(Base):
     name = Column(String(255))
     methods = Column(JSONEncodedDict)
     dependencies = Column(JSONEncodedDict)
+    target_code_snippets = Column(JSONEncodedDict, nullable=True)
     status = Column(String(50), default="PROPOSED")
 
     session = relationship("GenerationSession", back_populates="services")

@@ -475,6 +475,7 @@ async def get_decompositions(session_id: str, db: AsyncSession = Depends(get_db)
             "story": i.story,
             "has_code_mapping": is_mapped,
             "missing_reason": reason,
+            "target_code_snippet": getattr(i, 'target_code_snippet', None),
             "ai_validation_score": getattr(i, 'ai_validation_score', None),
             "ai_feedback": getattr(i, 'ai_feedback', None),
             "alignment_status": getattr(i, 'alignment_status', None)
@@ -575,7 +576,14 @@ async def get_services(session_id: str, db: AsyncSession = Depends(get_db)):
     items = result.scalars().all()
     print(f"[API DEBUG] GET /services called for session_id: {session_id} | Found {len(items)} database records.\n")
     return {"services": [
-        {"service_id": i.service_id, "name": i.name, "methods": i.methods, "dependencies": i.dependencies, "status": i.status} for i in items
+        {
+            "service_id": i.service_id,
+            "name": i.name,
+            "methods": i.methods,
+            "dependencies": i.dependencies,
+            "target_code_snippets": getattr(i, 'target_code_snippets', []),
+            "status": i.status
+        } for i in items
     ]}
 
 @router.put("/sessions/{session_id}/services/confirm")
