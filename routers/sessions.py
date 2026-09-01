@@ -18,6 +18,8 @@ from utils.docx_generator import generate_word_report_docx
 from utils.llm_client import get_llm
 from langchain_core.messages import HumanMessage
 from agent.nodes import extract_json_dict
+from agent.story_analyzer import run_story_function_gap_analysis
+from utils.git_utils import clone_repo, get_code_files, cleanup_repo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Body
 
@@ -569,6 +571,65 @@ async def get_gap_analysis(session_id: str, db: AsyncSession = Depends(get_db)):
         "missing_count": len(missing_items),
         "missing_items": missing_items
     }
+
+async def compute_and_save_story_function_analysis(session_id: str, sess: GenerationSession, db: AsyncSession) -> Dict[str, Any]:
+    # 1. Fetch uploaded story artifacts
+    art_result = await db.execute(select(Artifact).where(Artifact.session_id == session_id))
+    artifacts = art_result.scalars().all()
+    artifact_texts = []
+    for art in artifacts:
+        fname = art.filename or "artifact"
+        raw = art.raw_text or ""
+        artifact_texts.append(f"=== File: {fname} ===\n{raw}\n")
+    combined_artifacts = "\n".join(artifact_texts) if artifact_texts else ""
+
+    # 2. Fetch codebase if Git repo configured
+    tech_profile = dict(sess.tech_profile) if sess.tech_profile else {}
+    git_url = tech_profile.get("git_url")
+    git_branch = tech_profile.get("git_branch")
+    git_path = tech_profile.get("git_path")
+
+    code_context = ""
+    if git_url:
+        try:
+            temp_path = clone_repo(git_url, branch=git_branch)
+            code_context = get_code_files(temp_path, target_subpath=git_path)
+            cleanup_repo(temp_path)
+        except Exception as e:
+            print(f"[Story Analysis Git Clone Warning] {e}")
+
+    # 3. Run LLM extraction and codebase gap analysis
+    analysis_result = await run_story_function_gap_analysis(combined_artifacts, code_context)
+
+    # 4. Cache in tech_profile
+    tech_profile["story_function_analysis"] = analysis_result
+    sess.tech_profile = tech_profile
+    await db.commit()
+
+    return analysis_result
+
+@router.get("/sessions/{session_id}/story-function-analysis")
+async def get_story_function_analysis(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    tech_profile = sess.tech_profile or {}
+    cached = tech_profile.get("story_function_analysis")
+    if cached and cached.get("functions"):
+        return cached
+        
+    return await compute_and_save_story_function_analysis(session_id, sess, db)
+
+@router.post("/sessions/{session_id}/story-function-analysis")
+async def trigger_story_function_analysis(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+    sess = result.scalar_one_or_none()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    return await compute_and_save_story_function_analysis(session_id, sess, db)
 
 @router.get("/sessions/{session_id}/services")
 async def get_services(session_id: str, db: AsyncSession = Depends(get_db)):

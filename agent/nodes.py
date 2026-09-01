@@ -14,6 +14,7 @@ from database.database import AsyncSessionLocal
 from database.models import GenerationSession, Artifact, RequirementDecomposition, ServiceContract, UnitTest, CoverageMatrix, ReviewReport
 from sqlalchemy import select
 from utils.git_utils import clone_repo, get_code_files, cleanup_repo, get_repo_head_commit, get_modified_files
+from agent.story_analyzer import run_story_function_gap_analysis
 
 def extract_json_list(text: str) -> list:
     """
@@ -1247,6 +1248,24 @@ async def decomposition_node(state: AgentWorkflowState) -> AgentWorkflowState:
         await broadcast_log(session_id, f"[Requirement Decomposition] Extracted {len(rules_data)} rules. Warning: {missing_count} rule(s) have no matching code/functions in repository.")
     else:
         await broadcast_log(session_id, f"[Requirement Decomposition] Extracted {len(rules_data)} core business rules & acceptance criteria. All mapped to codebase.")
+
+    # Run Story Functions & Logic Deep Analysis
+    try:
+        await broadcast_log(session_id, "[Story Audit] Auditing required story functions, request payloads, and validation logic against codebase...")
+        fn_analysis = await run_story_function_gap_analysis(combined_artifacts, code_context)
+        state["story_function_analysis"] = fn_analysis
+        async with AsyncSessionLocal() as db:
+            s_res = await db.execute(select(GenerationSession).where(GenerationSession.session_id == session_id))
+            s_obj = s_res.scalar_one_or_none()
+            if s_obj:
+                p = dict(s_obj.tech_profile) if s_obj.tech_profile else {}
+                p["story_function_analysis"] = fn_analysis
+                s_obj.tech_profile = p
+                await db.commit()
+        await broadcast_log(session_id, f"[Story Audit] Completed: {fn_analysis.get('proper_count', 0)} proper, {fn_analysis.get('partial_miss_count', 0)} partial miss(es), {fn_analysis.get('missing_count', 0)} missing function(s).")
+    except Exception as e:
+        print(f"[Story Audit Warning] Failed to run story function gap analysis: {e}")
+
     state["current_node"] = "decomposition"
     return state
 
